@@ -1,0 +1,40 @@
+# 配置文件（安装时自动生成，含数据库密码）
+config/
+!config/.gitkeep
+
+# 授权服务器配置
+auth-server/config/database.php
+auth-server/data/
+
+# 用户上传文件
+uploads/
+!uploads/.gitkeep
+
+# 备份文件
+backups/
+*.sql.gz
+
+# 编译产物/缓存
+*.log
+error_log
+.DS_Store
+Thumbs.db
+
+# IDE 配置
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# 临时文件
+*.tmp
+*.temp
+tmp/
+
+# 开发过程记录（不推送）
+.codebuddy/
+
+# 打包文件
+*.rar
+*.zip
