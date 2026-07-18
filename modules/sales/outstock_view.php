@@ -1,10 +1,12 @@
 <?php
 require_once __DIR__ . '/../../includes/header.php';
+require_once __DIR__ . '/../../includes/migration.php';
 require_permission('sales_outstock');
 $pdo = getDB();
+run_migrations();
 $id = intval($_GET['id'] ?? 0);
 
-$stmt = $pdo->prepare("SELECT so.*, c.name as customer_name, c.phone as customer_phone, c.address as customer_address, w.name as warehouse_name, u.real_name as employee_name FROM sales_outstocks so LEFT JOIN customers c ON so.customer_id=c.id LEFT JOIN warehouses w ON so.warehouse_id=w.id LEFT JOIN users u ON so.employee_id=u.id WHERE so.id=?");
+$stmt = $pdo->prepare("SELECT so.*, c.name as customer_name, c.phone as customer_phone, c.address as customer_address, c.contact as customer_contact, w.name as warehouse_name, u.real_name as employee_name FROM sales_outstocks so LEFT JOIN customers c ON so.customer_id=c.id LEFT JOIN warehouses w ON so.warehouse_id=w.id LEFT JOIN users u ON so.employee_id=u.id WHERE so.id=?");
 $stmt->execute([$id]);
 $outstock = $stmt->fetch();
 if (!$outstock) { die('出库单不存在'); }
@@ -35,9 +37,25 @@ if ($trackingCode) {
     $trackingNoHtml = '<div style="text-align:center;font-size:12px;">' . $qrImg . '追踪码：' . htmlspecialchars($trackingCode['tracking_no']) . '</div>';
 }
 
-$stmt2 = $pdo->prepare("SELECT i.*, p.name as product_name, p.sku, p.spec, u.name as unit_name FROM sales_outstock_items i JOIN products p ON i.product_id=p.id LEFT JOIN units u ON p.unit_id=u.id WHERE i.outstock_id=?");
+$stmt2 = $pdo->prepare("SELECT i.*, p.name as product_name, p.sku, p.spec, p.image as product_image, p.description as product_description, u.name as unit_name FROM sales_outstock_items i JOIN products p ON i.product_id=p.id LEFT JOIN units u ON p.unit_id=u.id WHERE i.outstock_id=?");
 $stmt2->execute([$id]);
 $items = $stmt2->fetchAll();
+// 将商品图片转为 base64 嵌入（避免打印时路径失效）
+foreach ($items as &$it) {
+    $it['image_base64'] = '';
+    if (!empty($it['product_image'])) {
+        $imgPath = __DIR__ . '/../../' . $it['product_image'];
+        if (file_exists($imgPath)) {
+            $data = @file_get_contents($imgPath);
+            if ($data !== false) {
+                $ext = strtolower(pathinfo($imgPath, PATHINFO_EXTENSION));
+                $mime = in_array($ext, ['jpg','jpeg']) ? 'jpeg' : ($ext === 'svg' ? 'svg+xml' : $ext);
+                $it['image_base64'] = 'data:image/' . $mime . ';base64,' . base64_encode($data);
+            }
+        }
+    }
+}
+unset($it);
 
 // 查询关联销售订单信息
 $linkedOrder = null; $linkedOrderItems = [];
@@ -88,6 +106,50 @@ if ($selectedTplId > 0) {
     if (!$tpl) $tpl = $pdo->query("SELECT * FROM print_templates WHERE is_default=1 LIMIT 1")->fetch();
 }
 if (!$tpl && $templates) $tpl = $templates[0];
+
+// 自动初始化"产品项目方案单"模板（type=quote）
+$existQuoteOut = $pdo->prepare("SELECT COUNT(*) FROM print_templates WHERE name='产品项目方案单（含图片+描述）'");
+$existQuoteOut->execute();
+if ($existQuoteOut->fetchColumn() == 0) {
+    $quoteTplContentOut = '<div style="font-family:SimSun,Arial;padding:10px;max-width:900px;margin:0 auto;color:#000;">'
+    . '<div style="background:#000;color:#fff;padding:14px 18px;display:flex;align-items:center;justify-content:space-between;border-radius:4px 4px 0 0;">'
+    . '<h1 style="margin:0;font-size:28px;font-weight:bold;letter-spacing:4px;">产品项目方案单</h1>'
+    . '<div style="text-align:right;line-height:1.7;">'
+    . '<div style="font-size:18px;font-weight:bold;">{company_name}</div>'
+    . '<div style="font-size:13px;opacity:0.9;">{company_address}</div>'
+    . '</div></div>'
+    . '<div style="padding:10px 0 4px 0;font-size:14px;line-height:1.9;">'
+    . '<div><strong>TO：</strong>{customer_name}</div>'
+    . '<div style="display:flex;flex-wrap:wrap;gap:20px;">'
+    . '<span><strong>报价日期：</strong>{bill_date}</span>'
+    . '<span><strong>电话：</strong>{customer_phone}</span>'
+    . '<span><strong>联系人：</strong>{customer_contact}</span>'
+    . '</div></div>'
+    . '<div style="background:#ffc000;padding:8px 16px;font-weight:bold;margin:8px 0 0 0;font-size:14px;border:1px solid #000;border-bottom:none;">感谢您对本公司的支持与信赖，贵公司所需产品报价如下：</div>'
+    . '<table border="1" cellspacing="0" cellpadding="5" style="border-collapse:collapse;width:100%;font-size:12px;border:1px solid #000;table-layout:fixed;">'
+    . '<thead><tr style="background:#1e6bb8;color:#fff;font-size:14px;font-weight:bold;">'
+    . '<th style="width:55px;">编码</th>'
+    . '<th style="width:100px;">产品图片</th>'
+    . '<th style="width:75px;">产品名称</th>'
+    . '<th>描述</th>'
+    . '<th style="width:75px;">价格</th>'
+    . '<th style="width:50px;">数量</th>'
+    . '<th style="width:80px;">金额</th>'
+    . '</tr></thead>'
+    . '<tbody>{items}</tbody>'
+    . '</table>'
+    . '<div style="background:#ffc000;padding:10px 16px;display:flex;justify-content:space-between;font-weight:bold;font-size:14px;border:1px solid #000;border-top:none;">'
+    . '<span>小写合计（人民币）：{total_amount}</span>'
+    . '<span>大写合计（人民币）：{total_amount_cn}</span>'
+    . '</div>'
+    . '<div style="background:#ffc000;padding:10px 16px;font-size:13px;line-height:1.9;border:1px solid #000;border-top:1px dashed #000;">'
+    . '<strong>备注：</strong><br>{remark}'
+    . '</div>'
+    . '</div>';
+    $pdo->prepare("INSERT INTO print_templates (name,type,content,is_default) VALUES (?,?,?,0)")
+        ->execute(['产品项目方案单（含图片+描述）', 'quote', $quoteTplContentOut]);
+    $templates = $pdo->query("SELECT * FROM print_templates ORDER BY type, is_default DESC, id ASC")->fetchAll();
+}
 
 // 收款状态变更记录
 $stmt6 = $pdo->prepare("SELECT * FROM sales_outstock_paylogs WHERE outstock_id=? ORDER BY id DESC");
@@ -240,9 +302,56 @@ $payLogs = $stmt6->fetchAll();
 
 <div id="printContent" style="display:none;"></div>
 
-<?php $companyName = $pdo->query("SELECT setting_value FROM system_settings WHERE setting_key='company_name'")->fetchColumn() ?: SITE_NAME; ?>
+<?php $companyName = $pdo->query("SELECT setting_value FROM system_settings WHERE setting_key='company_name'")->fetchColumn() ?: SITE_NAME;
+$companyAddress = $pdo->query("SELECT setting_value FROM system_settings WHERE setting_key='company_address'")->fetchColumn() ?: '';
+$companyPhone = $pdo->query("SELECT setting_value FROM system_settings WHERE setting_key='company_phone'")->fetchColumn() ?: '';
+?>
 <script>
 function showPayModal(){ openModal('payModal'); }
+
+// 数字转中文大写金额（用于 {total_amount_cn} 变量）
+function numToCny(num) {
+    if (num === null || num === undefined || isNaN(num)) return '';
+    num = Math.abs(Number(num));
+    if (num === 0) return '零元整';
+    var upper = ['零','壹','贰','叁','肆','伍','陆','柒','捌','玖'];
+    var unit = ['', '拾', '佰', '仟'];
+    var bigUnit = ['', '万', '亿', '万亿'];
+    var s = num.toFixed(2);
+    var parts = s.split('.');
+    var intPart = parts[0];
+    var decPart = parts[1];
+    var intStr = '';
+    var len = intPart.length;
+    for (var i = 0; i < len; i++) {
+        var n = parseInt(intPart.charAt(i), 10);
+        var posInGroup = (len - 1 - i) % 4;
+        var groupIdx = Math.floor((len - 1 - i) / 4);
+        var u = unit[posInGroup];
+        var bu = bigUnit[groupIdx];
+        if (n !== 0) {
+            // 单位：每段内为拾/佰/仟，每段末尾（即 u 为空时）追加大单位 万/亿
+            intStr += upper[n] + u + (u === '' ? bu : '');
+        } else {
+            // 补零：仅在每段中间位置补，且不与前一个零连续
+            if (intStr.length > 0 && intStr.slice(-1) !== '零' && posInGroup !== 0) {
+                intStr += '零';
+            }
+        }
+    }
+    intStr = intStr.replace(/零+$/, '').replace(/零+/g, '零');
+    var result = intStr + '元';
+    var jiao = parseInt(decPart.charAt(0), 10);
+    var fen = parseInt(decPart.charAt(1), 10);
+    if (jiao === 0 && fen === 0) {
+        result += '整';
+    } else {
+        if (jiao > 0) result += upper[jiao] + '角';
+        else if (fen > 0) result += '零';
+        if (fen > 0) result += upper[fen] + '分';
+    }
+    return result;
+}
 
 // 商品明细数据（供打印模板使用）
 var printItems = <?= json_encode($items, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG) ?>;
@@ -250,16 +359,18 @@ var printItems = <?= json_encode($items, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG) 
 // 智能生成商品明细行：根据模板<thead>列名自动匹配数据字段
 function buildItemsHtml(items, templateHtml) {
     if (!items || !items.length) return '<tr><td colspan="10">暂无明细数据</td></tr>';
-    // 列名 → 数据字段 映射
+    // 列名 → 数据字段 映射（支持产品项目方案单：产品图片/描述/编码/产品名称/价格）
     var colMap = {
-        '序号':'__idx__','SKU':'sku','商品名称':'product_name','规格':'spec',
-        '单位':'unit_name','数量':'quantity','单价':'price','金额':'amount','备注':'__remark__'
+        '序号':'__idx__','SKU':'sku','编码':'sku','商品名称':'product_name','产品名称':'product_name',
+        '规格':'spec','单位':'unit_name','数量':'quantity','单价':'price','价格':'price',
+        '金额':'amount','备注':'__remark__',
+        '产品图片':'__image__','描述':'__description__'
     };
-    // 从模板中提取列名
+    // 从模板中提取列名（支持带 style 属性的 <th>）
     var theadMatch = templateHtml.match(/<thead>([\s\S]*?)<\/thead>/);
     var columns = [];
     if (theadMatch) {
-        var thRe = /<th>(.*?)<\/th>/g, m;
+        var thRe = /<th[^>]*>(.*?)<\/th>/g, m;
         while ((m = thRe.exec(theadMatch[1])) !== null) {
             var col = m[1].trim();
             if (col) columns.push(col);
@@ -277,10 +388,25 @@ function buildItemsHtml(items, templateHtml) {
                 rows += '<td>' + (i + 1) + '</td>';
             } else if (field === '__remark__') {
                 rows += '<td>' + (item.remark || '') + '</td>';
+            } else if (field === '__image__') {
+                if (item.image_base64) {
+                    rows += '<td><img src="' + item.image_base64 + '" style="max-width:100px;max-height:75px;object-fit:contain;" alt=""></td>';
+                } else if (item.product_image) {
+                    rows += '<td><img src="../../' + item.product_image + '" style="max-width:100px;max-height:75px;object-fit:contain;" alt=""></td>';
+                } else {
+                    rows += '<td style="color:#999;">-</td>';
+                }
+            } else if (field === '__description__') {
+                var desc = (item.product_description || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+                rows += '<td style="text-align:left;vertical-align:top;line-height:1.5;white-space:pre-line;">' + desc + '</td>';
             } else if (field && item[field] !== undefined && item[field] !== null) {
                 var val = String(item[field]);
                 if (field === 'price' || field === 'amount') val = '¥' + Number(val).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-                rows += '<td>' + val + '</td>';
+                var tdStyle = '';
+                if (columns[c] === '产品名称' || columns[c] === '商品名称') {
+                    tdStyle = ' style="text-align:left;word-break:break-all;"';
+                }
+                rows += '<td' + tdStyle + '>' + val + '</td>';
             } else {
                 rows += '<td></td>';
             }
@@ -298,11 +424,15 @@ var printData = {
     customer_name: '<?= js_escape($outstock['customer_name']??'') ?>',
     customer_phone: '<?= js_escape($outstock['customer_phone']??'') ?>',
     customer_address: '<?= js_escape($outstock['customer_address']??'') ?>',
+    customer_contact: '<?= js_escape($outstock['customer_contact']??'') ?>',
     warehouse_name: '<?= js_escape($outstock['warehouse_name']??'') ?>',
     total_amount: '¥<?= format_money($outstock['total_amount']) ?>',
+    total_amount_cn: '',
     remark: '<?= js_escape($outstock['remark']??'') ?>',
     user_name: '<?= js_escape(get_user_name()) ?>',
     company_name: '<?= js_escape($companyName ?? SITE_NAME) ?>',
+    company_address: '<?= js_escape($companyAddress) ?>',
+    company_phone: '<?= js_escape($companyPhone) ?>',
     tracking_no: '<?= js_escape($trackingNoHtml) ?>'
 };
 
@@ -314,6 +444,13 @@ function selectTpl(id) {
 }
 function renderPrintContent() {
     if (!currentTpl) return;
+    // 自动从 total_amount 提取数字并转为中文大写（用于 {total_amount_cn}）
+    var rawAmount = parseFloat(String(printData.total_amount).replace(/[¥,\s]/g, ''));
+    if (!isNaN(rawAmount)) {
+        printData.total_amount_cn = numToCny(rawAmount);
+    } else {
+        printData.total_amount_cn = '';
+    }
     var html = currentTpl.content;
     for (var k in printData) {
         html = html.replace(new RegExp('\\{'+k+'\\}', 'g'), printData[k]);
@@ -330,9 +467,9 @@ setTimeout(function(){ renderPrintContent(); }, 300);
 function printOutstock() {
     if (!currentTpl) return;
     renderPrintContent();
-    var win = window.open('', '_blank', 'width=800,height=600');
+    var win = window.open('', '_blank', 'width=900,height=600');
     win.document.write('<html><head><title>销售出库单打印</title>');
-    win.document.write('<style>body{font-family:SimSun;padding:20px;}table{border-collapse:collapse;width:100%;}table th,table td{border:1px solid #000;padding:6px;text-align:center;font-size:13px;}@media print{body{padding:0;}}</style>');
+    win.document.write('<style>body{font-family:SimSun,Arial;padding:10px;color:#000;background:#fff;margin:0;}*{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important;color-adjust:exact!important;}table{border-collapse:collapse;width:100%;}table th,table td{border:1px solid #000;padding:5px;text-align:center;font-size:12px;vertical-align:middle;}table th{font-weight:bold;}@media print{body{padding:0;margin:0;}.noprint{display:none;}}</style>');
     win.document.write('</head><body>');
     win.document.write(document.getElementById('printContent').innerHTML);
     win.document.write('</body></html>');

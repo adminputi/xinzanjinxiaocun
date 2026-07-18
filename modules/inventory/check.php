@@ -23,8 +23,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'create'
         $pdo->prepare("INSERT INTO check_orders (bill_no,warehouse_id,status,check_date,remark,user_id,created_at) VALUES (?,?,'draft',?,?,?,?)")->execute([$billNo,$warehouseId,$checkDate,$remark,get_user_id(),date('Y-m-d H:i:s')]);
         $checkId = $pdo->lastInsertId();
 
-        // 加载该仓库所有商品库存作为账面数
-        $st = $pdo->prepare("SELECT i.product_id, i.quantity FROM inventory i JOIN products p ON i.product_id=p.id WHERE i.warehouse_id=? AND p.status=1");
+        // 加载该仓库所有启用商品作为账面数（含无库存记录的新商品）
+        $st = $pdo->prepare("SELECT p.id as product_id, COALESCE(i.quantity, 0) as quantity FROM products p LEFT JOIN inventory i ON i.product_id=p.id AND i.warehouse_id=? WHERE p.status=1");
         $st->execute([$warehouseId]);
         $stockItems = $st->fetchAll();
         $insStmt = $pdo->prepare("INSERT INTO check_items (check_id,product_id,book_qty,actual_qty,diff_qty) VALUES (?,?,?,0,0)");

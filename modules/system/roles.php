@@ -39,7 +39,7 @@ $allPerms = [
     'product_view' => '商品查看', 'product_category' => '商品分类管理', 'warehouse_view' => '仓库查看',
     'customer_view' => '客户查看', 'supplier_view' => '供应商查看',
     'purchase_order' => '采购订单', 'purchase_instock' => '采购入库', 'purchase_return' => '采购退货', 'purchase_reconcile' => '采购对账',
-    'sales_order' => '销售订单', 'sales_outstock' => '销售出库', 'sales_return' => '销售退货', 'sales_reconcile' => '客户对账', 'print_template' => '打印模板',
+    'sales_quote' => '销售报价', 'sales_order' => '销售订单', 'sales_outstock' => '销售出库', 'sales_return' => '销售退货', 'sales_reconcile' => '客户对账', 'print_template' => '打印模板',
     'inventory_view' => '库存查看', 'inventory_log' => '库存变动', 'transfer_manage' => '调拨管理', 'check_manage' => '盘点管理', 'loss_manage' => '报损报溢',
     'finance_arpay' => '应收应付', 'finance_receive' => '收款记录', 'finance_payment' => '付款记录', 'finance_aging' => '账龄分析',
     'report_sales' => '销售报表', 'report_purchase' => '采购报表', 'report_inventory' => '库存报表', 'report_performance' => '业绩报表', 'report_io' => '出入库汇总',

@@ -688,6 +688,7 @@ function get_menu() {
         ]],
         // 4. 销售管理
         ['name' => '销售管理', 'icon' => 'bag-shopping', 'perm' => 'sales', 'children' => [
+            ['name' => '销售报价', 'url' => 'modules/sales/quote.php', 'icon' => 'file-invoice-dollar', 'perm' => 'sales_quote'],
             ['name' => '销售订单', 'url' => 'modules/sales/order.php', 'icon' => 'file-lines', 'perm' => 'sales_order'],
             ['name' => '销售出库', 'url' => 'modules/sales/outstock.php', 'icon' => 'right-from-bracket', 'perm' => 'sales_outstock'],
             ['name' => '销售退货', 'url' => 'modules/sales/return.php', 'icon' => 'right-to-bracket', 'perm' => 'sales_return'],

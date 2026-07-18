@@ -85,18 +85,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'min_stock' => floatval($_POST['min_stock'] ?? 0),
             'max_stock' => floatval($_POST['max_stock'] ?? 0),
             'remark' => $_POST['remark'] ?? '',
+            'description' => $_POST['description'] ?? '',
         ];
 
         if (empty($data['name']) || empty($data['sku'])) {
             $error = '商品名称和SKU编码不能为空';
         } else {
             if ($id > 0) {
-                $stmt = $pdo->prepare("UPDATE products SET sku=?,name=?,category_id=?,unit_id=?,spec=?,barcode=?,purchase_price=?,sale_price=?,min_stock=?,max_stock=?,remark=? WHERE id=?");
-                $stmt->execute([$data['sku'],$data['name'],$data['category_id'],$data['unit_id'],$data['spec'],$data['barcode'],$data['purchase_price'],$data['sale_price'],$data['min_stock'],$data['max_stock'],$data['remark'],$id]);
+                $stmt = $pdo->prepare("UPDATE products SET sku=?,name=?,category_id=?,unit_id=?,spec=?,barcode=?,purchase_price=?,sale_price=?,min_stock=?,max_stock=?,remark=?,description=? WHERE id=?");
+                $stmt->execute([$data['sku'],$data['name'],$data['category_id'],$data['unit_id'],$data['spec'],$data['barcode'],$data['purchase_price'],$data['sale_price'],$data['min_stock'],$data['max_stock'],$data['remark'],$data['description'],$id]);
                 add_log(get_user_id(), 'update', 'product', "修改商品: {$data['name']}");
             } else {
-                $stmt = $pdo->prepare("INSERT INTO products (sku,name,category_id,unit_id,spec,barcode,purchase_price,sale_price,min_stock,max_stock,remark,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)");
-                $stmt->execute([$data['sku'],$data['name'],$data['category_id'],$data['unit_id'],$data['spec'],$data['barcode'],$data['purchase_price'],$data['sale_price'],$data['min_stock'],$data['max_stock'],$data['remark'],date('Y-m-d H:i:s')]);
+                $stmt = $pdo->prepare("INSERT INTO products (sku,name,category_id,unit_id,spec,barcode,purchase_price,sale_price,min_stock,max_stock,remark,description,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)");
+                $stmt->execute([$data['sku'],$data['name'],$data['category_id'],$data['unit_id'],$data['spec'],$data['barcode'],$data['purchase_price'],$data['sale_price'],$data['min_stock'],$data['max_stock'],$data['remark'],$data['description'],date('Y-m-d H:i:s')]);
                 add_log(get_user_id(), 'create', 'product', "新增商品: {$data['name']}");
             }
             redirect("list.php?page=$page&search=$search&category_id=$categoryId");
@@ -288,6 +289,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     </div>
                 </div>
                 <div class="form-group">
+                    <label class="form-label">商品描述 <span style="color:var(--gray-400);font-weight:normal;font-size:12px;">（用于产品项目方案单/报价单打印，可填写详细规格参数、特性介绍等）</span></label>
+                    <textarea name="description" id="pdescription" class="form-control" rows="4" placeholder="例如：&#10;外形尺寸：长2600mm 宽2100mm 高2200mm&#10;造雪机喷嘴数量：216个&#10;出雪量：6.22-64.48m³/h&#10;电压值：7.5 kw/h&#10;喷射半径：65m-60m&#10;保修时间：3年"></textarea>
+                </div>
+                <div class="form-group">
                     <label class="form-label">备注</label>
                     <textarea name="remark" id="premark" class="form-control" rows="2"></textarea>
                 </div>
@@ -376,6 +381,7 @@ function openNewProduct() {
     document.getElementById('pmin').value = '';
     document.getElementById('pmax').value = '';
     document.getElementById('premark').value = '';
+    document.getElementById('pdescription').value = '';
     currentEditProductId = 0;
     document.getElementById('imageUploadArea').style.display = 'none';
     document.getElementById('imageUploadHint').style.display = 'inline';
@@ -402,6 +408,7 @@ function editProduct(data) {
     document.getElementById('pmin').value = data.min_stock;
     document.getElementById('pmax').value = data.max_stock;
     document.getElementById('premark').value = data.remark || '';
+    document.getElementById('pdescription').value = data.description || '';
     currentEditProductId = data.id;
     loadProductImages(data.id);
     document.getElementById('imageUploadArea').style.display = 'block';
@@ -509,6 +516,9 @@ function viewProductDetail(productId) {
         html += '<tr><td style="padding:6px 12px;color:var(--gray-500);font-size:13px;">库存预警</td><td style="padding:6px 12px;">最低 ' + Number(p.min_stock).toFixed(0) + ' / 最高 ' + Number(p.max_stock).toFixed(0) + '</td></tr>';
         html += '<tr><td style="padding:6px 12px;color:var(--gray-500);font-size:13px;">库存金额</td><td style="padding:6px 12px;color:var(--primary);font-weight:500;">&yen;' + Number(p.stock_value || 0).toFixed(2) + '</td></tr>';
         html += '<tr><td style="padding:6px 12px;color:var(--gray-500);font-size:13px;">状态</td><td style="padding:6px 12px;">' + (p.status == 1 ? '<span class="badge badge-success">启用</span>' : '<span class="badge badge-gray">禁用</span>') + '</td></tr>';
+        if (p.description) {
+            html += '<tr><td style="padding:6px 12px;color:var(--gray-500);font-size:13px;vertical-align:top;">商品描述</td><td style="padding:6px 12px;word-break:break-word;overflow-wrap:break-word;white-space:pre-wrap;max-width:400px;">' + escHtml(p.description) + '</td></tr>';
+        }
         if (p.remark) {
             html += '<tr><td style="padding:6px 12px;color:var(--gray-500);font-size:13px;vertical-align:top;">备注</td><td style="padding:6px 12px;word-break:break-word;overflow-wrap:break-word;white-space:pre-wrap;max-width:400px;">' + escHtml(p.remark) + '</td></tr>';
         }

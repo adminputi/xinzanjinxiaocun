@@ -133,7 +133,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'save') 
             $pdo->commit();
             redirect('outstock.php');
         }
-    } catch (Exception $e) { $pdo->rollBack(); error_log('Outstock save error: '.$e->getMessage()); $error = '保存失败，请稍后重试'; }
+    } catch (Exception $e) { $pdo->rollBack(); error_log('Outstock save error: '.$e->getMessage()); $error = '保存失败：' . $e->getMessage(); }
 
 }
 

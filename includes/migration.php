@@ -106,14 +106,52 @@ function run_migrations() {
              
         // ========== 订单明细行备注 ==========
         'purchase_order_items_remark' =>
-            "ALTER TABLE purchase_order_items 
+            "ALTER TABLE purchase_order_items
              ADD COLUMN IF NOT EXISTS remark VARCHAR(500) DEFAULT NULL COMMENT '行备注'",
         'sales_order_items_remark' =>
-            "ALTER TABLE sales_order_items 
+            "ALTER TABLE sales_order_items
              ADD COLUMN IF NOT EXISTS remark VARCHAR(500) DEFAULT NULL COMMENT '行备注'",
         'sales_outstock_items_remark' =>
-            "ALTER TABLE sales_outstock_items 
+            "ALTER TABLE sales_outstock_items
              ADD COLUMN IF NOT EXISTS remark VARCHAR(500) DEFAULT NULL COMMENT '行备注'",
+
+        // ========== 商品描述（用于产品项目方案单/报价单打印） ==========
+        'products_description' =>
+            "ALTER TABLE products
+             ADD COLUMN IF NOT EXISTS description TEXT COMMENT '商品描述（用于产品项目方案单打印）'",
+
+        // ========== 销售报价单 ==========
+        'sales_quotes_table' =>
+            "CREATE TABLE IF NOT EXISTS `sales_quotes` (
+                `id` INT AUTO_INCREMENT PRIMARY KEY,
+                `bill_no` VARCHAR(100) NOT NULL UNIQUE,
+                `customer_id` INT DEFAULT 0,
+                `total_amount` DECIMAL(12,2) DEFAULT 0,
+                `status` ENUM('draft','quoted','withdrawn') DEFAULT 'draft',
+                `order_id` INT DEFAULT NULL COMMENT '关联的销售订单ID',
+                `quote_date` DATE DEFAULT NULL,
+                `employee_id` INT DEFAULT 0 COMMENT '业务员',
+                `remark` TEXT,
+                `user_id` INT DEFAULT 0,
+                `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
+                `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                INDEX `idx_customer` (`customer_id`),
+                INDEX `idx_status` (`status`),
+                INDEX `idx_user` (`user_id`),
+                INDEX `idx_order` (`order_id`)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+        'sales_quote_items_table' =>
+            "CREATE TABLE IF NOT EXISTS `sales_quote_items` (
+                `id` INT AUTO_INCREMENT PRIMARY KEY,
+                `quote_id` INT NOT NULL,
+                `product_id` INT NOT NULL,
+                `quantity` DECIMAL(12,2) DEFAULT 0,
+                `price` DECIMAL(12,2) DEFAULT 0,
+                `amount` DECIMAL(12,2) DEFAULT 0,
+                `remark` VARCHAR(500) DEFAULT NULL COMMENT '行备注',
+                INDEX `idx_quote` (`quote_id`),
+                INDEX `idx_product` (`product_id`)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
     ];
     
     // 执行未完成的迁移
