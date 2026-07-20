@@ -6,7 +6,7 @@ $pdo = getDB();
 run_migrations();
 $id = intval($_GET['id'] ?? 0);
 
-$stmt = $pdo->prepare("SELECT q.*, c.name as customer_name, c.phone as customer_phone, c.address as customer_address, c.contact as customer_contact, u.real_name as employee_name FROM sales_quotes q LEFT JOIN customers c ON q.customer_id=c.id LEFT JOIN users u ON q.employee_id=u.id WHERE q.id=?");
+$stmt = $pdo->prepare("SELECT q.*, c.name as customer_name, c.phone as customer_phone, c.address as customer_address, c.contact as customer_contact, u.real_name as employee_name, u.phone as employee_phone FROM sales_quotes q LEFT JOIN customers c ON q.customer_id=c.id LEFT JOIN users u ON q.employee_id=u.id WHERE q.id=?");
 $stmt->execute([$id]);
 $quote = $stmt->fetch();
 if (!$quote) { die('报价单不存在'); }
@@ -205,6 +205,7 @@ var printData = {
     customer_address: '<?= js_escape($quote['customer_address']??'') ?>',
     customer_contact: '<?= js_escape($quote['customer_contact']??'') ?>',
     employee_name: '<?= js_escape($quote['employee_name']??'') ?>',
+    employee_phone: '<?= js_escape($quote['employee_phone']??'') ?>',
     total_amount: '¥<?= format_money($quote['total_amount']) ?>',
     total_amount_cn: '',
     remark: '<?= js_escape($quote['remark']??'') ?>',

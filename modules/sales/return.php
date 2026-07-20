@@ -75,7 +75,7 @@ $stmt = $pdo->prepare("SELECT sr.*, c.name as customer_name, w.name as warehouse
 $stmt->execute($retParams);
 $list = $stmt->fetchAll();
 
-$customers = get_options('customers','id','name','status=1');
+$customers = $isAdminRet ? get_options('customers','id','name','status=1') : get_options('customers','id','name',[['status','=',1],['owner_id','=',get_user_id()]]);
 $warehouses = get_options('warehouses','id','name','status=1');
 $products = $pdo->query("SELECT id,sku,name,sale_price FROM products WHERE status=1")->fetchAll();
 

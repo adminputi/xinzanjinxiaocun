@@ -1,6 +1,8 @@
 <?php
 require_once __DIR__ . '/../../includes/header.php';
-require_permission('finance_aging');
+if (!check_permission('finance_aging') && !check_permission('sales_reconcile')) {
+    require_permission('finance_aging'); // 两个权限都没有才拒绝
+}
 $pdo = getDB();
 
 $customerId = intval($_GET['customer_id'] ?? 0);

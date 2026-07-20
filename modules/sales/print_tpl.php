@@ -90,7 +90,7 @@ if ($existQuote->fetchColumn() == 0) {
 <div class="card">
     <div class="card-header">
         <h3 class="card-title">模板列表</h3>
-        <div class="alert alert-info" style="margin:0;padding:6px 12px;font-size:12px;">可用变量：{company_name} {company_address} {bill_no} {bill_date} {customer_name} {customer_phone} {customer_address} {customer_contact} {supplier_name} {warehouse_name} {items} {total_amount} {total_amount_cn} {remark} {user_name} {tracking_no}</div>
+        <div class="alert alert-info" style="margin:0;padding:6px 12px;font-size:12px;">可用变量：{company_name} {company_address} {bill_no} {bill_date} {customer_name} {customer_phone} {customer_address} {customer_contact} {supplier_name} {warehouse_name} {employee_name} {employee_phone} {items} {total_amount} {total_amount_cn} {remark} {user_name} {tracking_no}</div>
     </div>
     <div class="card-body">
         <h4 style="margin-bottom:10px;font-size:14px;">📋 可用变量说明</h4>
@@ -107,6 +107,8 @@ if ($existQuote->fetchColumn() == 0) {
             <tr><td style="padding:4px 10px;border:1px solid #e2e8f0;"><code>{customer_contact}</code></td><td style="padding:4px 10px;border:1px solid #e2e8f0;">客户联系人</td><td style="padding:4px 10px;border:1px solid #e2e8f0;">销售单/销售出库单</td></tr>
             <tr><td style="padding:4px 10px;border:1px solid #e2e8f0;"><code>{supplier_name}</code></td><td style="padding:4px 10px;border:1px solid #e2e8f0;">供应商名称</td><td style="padding:4px 10px;border:1px solid #e2e8f0;">采购单/采购入库单</td></tr>
             <tr><td style="padding:4px 10px;border:1px solid #e2e8f0;"><code>{warehouse_name}</code></td><td style="padding:4px 10px;border:1px solid #e2e8f0;">仓库名称</td><td style="padding:4px 10px;border:1px solid #e2e8f0;">全部</td></tr>
+            <tr><td style="padding:4px 10px;border:1px solid #e2e8f0;"><code>{employee_name}</code></td><td style="padding:4px 10px;border:1px solid #e2e8f0;">业务员姓名</td><td style="padding:4px 10px;border:1px solid #e2e8f0;">销售单/销售出库单/报价单</td></tr>
+            <tr><td style="padding:4px 10px;border:1px solid #e2e8f0;"><code>{employee_phone}</code></td><td style="padding:4px 10px;border:1px solid #e2e8f0;">业务员电话</td><td style="padding:4px 10px;border:1px solid #e2e8f0;">销售单/销售出库单/报价单</td></tr>
             <tr><td style="padding:4px 10px;border:1px solid #e2e8f0;"><code>{items}</code></td><td style="padding:4px 10px;border:1px solid #e2e8f0;">商品明细行（自动匹配&lt;thead&gt;列名生成&lt;tr&gt;），支持的列名：<strong>序号</strong>、<strong>SKU/编码</strong>、<strong>商品名称/产品名称</strong>、<strong>规格</strong>、<strong>单位</strong>、<strong>数量</strong>、<strong>单价/价格</strong>、<strong>金额</strong>、<strong>备注</strong>、<strong>产品图片</strong>（base64嵌入，120×90px）、<strong>描述</strong>（取商品描述字段）</td><td style="padding:4px 10px;border:1px solid #e2e8f0;">全部</td></tr>
             <tr><td style="padding:4px 10px;border:1px solid #e2e8f0;"><code>{total_amount}</code></td><td style="padding:4px 10px;border:1px solid #e2e8f0;">合计金额</td><td style="padding:4px 10px;border:1px solid #e2e8f0;">全部</td></tr>
             <tr><td style="padding:4px 10px;border:1px solid #e2e8f0;"><code>{total_amount_cn}</code></td><td style="padding:4px 10px;border:1px solid #e2e8f0;">合计金额大写（手动填写）</td><td style="padding:4px 10px;border:1px solid #e2e8f0;">全部</td></tr>
@@ -298,6 +300,8 @@ function previewTpl(d){
         customer_contact: '丁毅',
         supplier_name: '李四供应商',
         warehouse_name: '总仓',
+        employee_name: '张业务',
+        employee_phone: '13800138000',
         total_amount: '¥241,480.00',
         total_amount_cn: '贰拾肆万壹仟肆佰捌拾元整',
         user_name: '丁毅',

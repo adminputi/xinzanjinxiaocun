@@ -25,7 +25,12 @@ if ($id > 0) {
     $items = $stmt->fetchAll();
 }
 
-$customers = get_options('customers', 'id', 'name', 'status=1');
+$isAdmin = ($_SESSION['user_role'] ?? '') === 'admin';
+if ($isAdmin) {
+    $customers = get_options('customers', 'id', 'name', 'status=1');
+} else {
+    $customers = get_options('customers', 'id', 'name', [['status','=',1], ['owner_id','=',get_user_id()]]);
+}
 $employees = get_options('users', 'id', 'real_name', 'status=1');
 $products = $pdo->query("SELECT id, sku, name, spec, sale_price, (SELECT name FROM units WHERE id=unit_id) as unit_name FROM products WHERE status=1 ORDER BY id")->fetchAll();
 

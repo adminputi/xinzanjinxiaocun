@@ -12,8 +12,8 @@ if ($id > 0) {
     $stmt->execute([$id]);
     $order = $stmt->fetch();
     if (!$order) die('订单不存在');
-    // 非admin用户只能编辑自己的记录
-    if ($_SESSION['user_role'] !== 'admin' && ($order['user_id'] ?? 0) != get_user_id()) die('无权编辑此记录');
+    // 仅admin可以编辑订单
+    if ($_SESSION['user_role'] !== 'admin') die('仅管理员可编辑订单。<a href="order.php">返回列表</a>');
     // 非draft状态不允许编辑
     if ($order['status'] !== 'draft') {
         die('该订单已确认或已出库，无法编辑。<a href="order.php">返回列表</a>');
@@ -23,7 +23,8 @@ if ($id > 0) {
     $items = $stmt->fetchAll();
 }
 
-$customers = get_options('customers', 'id', 'name', 'status=1');
+$isAdmin = ($_SESSION['user_role'] ?? '') === 'admin';
+$customers = $isAdmin ? get_options('customers', 'id', 'name', 'status=1') : get_options('customers', 'id', 'name', [['status','=',1],['owner_id','=',get_user_id()]]);
 $warehouses = get_options('warehouses', 'id', 'name', 'status=1');
 $employees = get_options('users', 'id', 'real_name', 'status=1');
 $products = $pdo->query("SELECT id, sku, name, spec, sale_price, (SELECT name FROM units WHERE id=unit_id) as unit_name FROM products WHERE status=1 ORDER BY id")->fetchAll();

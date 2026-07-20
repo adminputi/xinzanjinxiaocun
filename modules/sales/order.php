@@ -31,9 +31,10 @@ $stmt->execute($params); $list = $stmt->fetchAll();
 $statusLabels = ['draft'=>'可编辑','confirmed'=>'已锁定','shipped'=>'已出库'];
 $statusBadges = ['draft'=>'warning','confirmed'=>'info','shipped'=>'success'];
 
-// 确认订单（draft → confirmed）
+// 确认订单（draft → confirmed）仅admin
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'confirm') {
     csrf_verify();
+    if (!$isAdmin) die('仅管理员可确认订单');
     $oid = intval($_POST['id']??0);
     $stmt = $pdo->prepare("SELECT * FROM sales_orders WHERE id=?");
     $stmt->execute([$oid]);
@@ -140,9 +141,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'delete'
     <td>
         <div class="table-actions">
             <?php if ($item['status'] === 'draft'): ?>
+            <?php if ($isAdmin): ?>
             <form method="post" style="display:inline"><?= csrf_field() ?><input type="hidden" name="action" value="confirm"><input type="hidden" name="id" value="<?=$item['id']?>"><button class="btn btn-sm btn-success">确认</button></form>
             <a href="order_form.php?id=<?=$item['id']?>" class="btn btn-sm btn-outline">编辑</a>
-            <?php if ($isAdmin): ?><form method="post" style="display:inline" onsubmit="return confirm('确定删除该订单吗？删除后不可恢复。')"><?= csrf_field() ?><input type="hidden" name="action" value="delete"><input type="hidden" name="id" value="<?=$item['id']?>"><button class="btn btn-sm btn-danger">删除</button></form><?php endif; ?>
+            <form method="post" style="display:inline" onsubmit="return confirm('确定删除该订单吗？删除后不可恢复。')"><?= csrf_field() ?><input type="hidden" name="action" value="delete"><input type="hidden" name="id" value="<?=$item['id']?>"><button class="btn btn-sm btn-danger">删除</button></form>
+            <?php endif; ?>
             <a href="order_view.php?id=<?=$item['id']?>" class="btn btn-sm btn-outline">详情</a>
             <?php elseif ($item['status'] === 'confirmed'): ?>
             <?php if ($isAdmin): ?><form method="post" style="display:inline"><?= csrf_field() ?><input type="hidden" name="action" value="unlock"><input type="hidden" name="id" value="<?=$item['id']?>"><button class="btn btn-sm" style="color:var(--gray-400);border-color:var(--gray-300);background:var(--gray-50);">已锁定</button></form><?php endif; ?>

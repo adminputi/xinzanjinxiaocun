@@ -43,7 +43,7 @@ if ($summaries) {
     }
 }
 
-$customers = get_options('customers','id','name','status=1');
+$customers = $isAdminRec ? get_options('customers','id','name','status=1') : get_options('customers','id','name',[['status','=',1],['owner_id','=',get_user_id()]]);
 $totalOrder = array_sum(array_column($summaries,'order_total'));
 $totalReceived = array_sum(array_column($summaries,'received_total'));
 $totalInitial = array_sum(array_column($summaries,'initial_balance'));

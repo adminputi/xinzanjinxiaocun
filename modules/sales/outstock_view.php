@@ -6,7 +6,7 @@ $pdo = getDB();
 run_migrations();
 $id = intval($_GET['id'] ?? 0);
 
-$stmt = $pdo->prepare("SELECT so.*, c.name as customer_name, c.phone as customer_phone, c.address as customer_address, c.contact as customer_contact, w.name as warehouse_name, u.real_name as employee_name FROM sales_outstocks so LEFT JOIN customers c ON so.customer_id=c.id LEFT JOIN warehouses w ON so.warehouse_id=w.id LEFT JOIN users u ON so.employee_id=u.id WHERE so.id=?");
+$stmt = $pdo->prepare("SELECT so.*, c.name as customer_name, c.phone as customer_phone, c.address as customer_address, c.contact as customer_contact, w.name as warehouse_name, u.real_name as employee_name, u.phone as employee_phone FROM sales_outstocks so LEFT JOIN customers c ON so.customer_id=c.id LEFT JOIN warehouses w ON so.warehouse_id=w.id LEFT JOIN users u ON so.employee_id=u.id WHERE so.id=?");
 $stmt->execute([$id]);
 $outstock = $stmt->fetch();
 if (!$outstock) { die('出库单不存在'); }
@@ -75,22 +75,17 @@ $payBadge = ['paid_full'=>'success','paid_deposit'=>'warning','unpaid'=>'danger'
 
 // 确保打印模板表存在且模板已更新到最新版本
 try { $pdo->exec("CREATE TABLE IF NOT EXISTS `print_templates` (`id` INT AUTO_INCREMENT PRIMARY KEY, `name` VARCHAR(100) NOT NULL, `type` VARCHAR(30) NOT NULL DEFAULT 'sales_outstock', `content` TEXT, `is_default` TINYINT DEFAULT 0, `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"); } catch (Exception $e) {}
-$tplCount = $pdo->query("SELECT COUNT(*) FROM print_templates WHERE type='sales_outstock'")->fetchColumn();
-$needUpdate = $pdo->query("SELECT COUNT(*) FROM print_templates WHERE type='sales_outstock' AND (content NOT LIKE '%<thead>%' OR content NOT LIKE '%{tracking_no}%')")->fetchColumn();
-// 旧模板（没有<thead>标签或缺{tracking_no}变量）需要更新，或模板数量不足2个时重新初始化
-if ($needUpdate > 0 || $tplCount < 2) {
-    $pdo->exec("DELETE FROM print_templates WHERE type='sales_outstock' AND (content NOT LIKE '%<thead>%' OR content NOT LIKE '%{tracking_no}%')");
-    // 检查是否已有新模板，避免重复插入
-    $existA = $pdo->query("SELECT COUNT(*) FROM print_templates WHERE type='sales_outstock' AND name='默认销售出库单（含单价金额）'")->fetchColumn();
-    $existB = $pdo->query("SELECT COUNT(*) FROM print_templates WHERE type='sales_outstock' AND name='默认销售出库单（不含单价金额）'")->fetchColumn();
-    if ($existA == 0) {
-        $defaultTplA = '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px;"><div style="flex:1;text-align:center;"><h2>{company_name}</h2><h3>销售出库单</h3></div><div style="flex-shrink:0;">{tracking_no}</div></div><div style="margin-bottom:12px;"><span>单号：{bill_no}</span><span style="margin-left:24px;">日期：{bill_date}</span></div><div style="margin-bottom:12px;"><span>客户：{customer_name}</span><span style="margin-left:24px;">电话：{customer_phone}</span></div><div style="margin-bottom:12px;"><span>地址：{customer_address}</span><span style="margin-left:24px;">仓库：{warehouse_name}</span></div><table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse;width:100%;"><thead><tr><th>序号</th><th>商品名称</th><th>规格</th><th>单位</th><th>数量</th><th>单价</th><th>金额</th><th>备注</th></tr></thead><tbody>{items}</tbody><tfoot><tr><td colspan="7" align="right"><strong>合计金额：</strong></td><td>{total_amount}</td></tr></tfoot></table><div style="margin-top:16px;display:flex;justify-content:space-between;"><span>制单人：{user_name}</span><span>打印时间：' . date('Y-m-d H:i:s') . '</span></div>';
-        $pdo->prepare("INSERT INTO print_templates (name,type,content,is_default) VALUES (?,?,?,1)")->execute(['默认销售出库单（含单价金额）','sales_outstock',$defaultTplA]);
-    }
-    if ($existB == 0) {
-        $defaultTplB = '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px;"><div style="flex:1;text-align:center;"><h2>{company_name}</h2><h3>销售出库单（送货单）</h3></div><div style="flex-shrink:0;">{tracking_no}</div></div><div style="margin-bottom:12px;"><span>单号：{bill_no}</span><span style="margin-left:24px;">日期：{bill_date}</span></div><div style="margin-bottom:12px;"><span>客户：{customer_name}</span><span style="margin-left:24px;">电话：{customer_phone}</span></div><div style="margin-bottom:12px;"><span>地址：{customer_address}</span><span style="margin-left:24px;">仓库：{warehouse_name}</span></div><table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse;width:100%;"><thead><tr><th>序号</th><th>商品名称</th><th>规格</th><th>单位</th><th>数量</th><th>备注</th></tr></thead><tbody>{items}</tbody></table><div style="margin-top:40px;display:flex;justify-content:space-between;flex-wrap:wrap;"><span>制单人：{user_name}</span><span>审核人：___________</span><span>客户签字：___________</span><span>业务签字：___________</span></div>';
-        $pdo->prepare("INSERT INTO print_templates (name,type,content,is_default) VALUES (?,?,?,0)")->execute(['默认销售出库单（不含单价金额）','sales_outstock',$defaultTplB]);
-    }
+// 仅删除过时的默认模板（按名称精确匹配，不触碰用户自定义模板）
+$pdo->exec("DELETE FROM print_templates WHERE type='sales_outstock' AND name IN ('默认销售出库单（含单价金额）','默认销售出库单（不含单价金额）') AND (content NOT LIKE '%<thead>%' OR content NOT LIKE '%{tracking_no}%')");
+$existA = $pdo->query("SELECT COUNT(*) FROM print_templates WHERE type='sales_outstock' AND name='默认销售出库单（含单价金额）'")->fetchColumn();
+$existB = $pdo->query("SELECT COUNT(*) FROM print_templates WHERE type='sales_outstock' AND name='默认销售出库单（不含单价金额）'")->fetchColumn();
+if ($existA == 0) {
+    $defaultTplA = '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px;"><div style="flex:1;text-align:center;"><h2>{company_name}</h2><h3>销售出库单</h3></div><div style="flex-shrink:0;">{tracking_no}</div></div><div style="margin-bottom:12px;"><span>单号：{bill_no}</span><span style="margin-left:24px;">日期：{bill_date}</span></div><div style="margin-bottom:12px;"><span>客户：{customer_name}</span><span style="margin-left:24px;">电话：{customer_phone}</span></div><div style="margin-bottom:12px;"><span>地址：{customer_address}</span><span style="margin-left:24px;">仓库：{warehouse_name}</span></div><table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse;width:100%;"><thead><tr><th>序号</th><th>商品名称</th><th>规格</th><th>单位</th><th>数量</th><th>单价</th><th>金额</th><th>备注</th></tr></thead><tbody>{items}</tbody><tfoot><tr><td colspan="7" align="right"><strong>合计金额：</strong></td><td>{total_amount}</td></tr></tfoot></table><div style="margin-top:16px;display:flex;justify-content:space-between;"><span>制单人：{user_name}</span><span>打印时间：' . date('Y-m-d H:i:s') . '</span></div>';
+    $pdo->prepare("INSERT INTO print_templates (name,type,content,is_default) VALUES (?,?,?,1)")->execute(['默认销售出库单（含单价金额）','sales_outstock',$defaultTplA]);
+}
+if ($existB == 0) {
+    $defaultTplB = '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px;"><div style="flex:1;text-align:center;"><h2>{company_name}</h2><h3>销售出库单（送货单）</h3></div><div style="flex-shrink:0;">{tracking_no}</div></div><div style="margin-bottom:12px;"><span>单号：{bill_no}</span><span style="margin-left:24px;">日期：{bill_date}</span></div><div style="margin-bottom:12px;"><span>客户：{customer_name}</span><span style="margin-left:24px;">电话：{customer_phone}</span></div><div style="margin-bottom:12px;"><span>地址：{customer_address}</span><span style="margin-left:24px;">仓库：{warehouse_name}</span></div><table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse;width:100%;"><thead><tr><th>序号</th><th>商品名称</th><th>规格</th><th>单位</th><th>数量</th><th>备注</th></tr></thead><tbody>{items}</tbody></table><div style="margin-top:40px;display:flex;justify-content:space-between;flex-wrap:wrap;"><span>制单人：{user_name}</span><span>审核人：___________</span><span>客户签字：___________</span><span>业务签字：___________</span></div>';
+    $pdo->prepare("INSERT INTO print_templates (name,type,content,is_default) VALUES (?,?,?,0)")->execute(['默认销售出库单（不含单价金额）','sales_outstock',$defaultTplB]);
 }
 
 // 获取所有打印模板（不限类型，用户可在详情页选择任意模板打印）
@@ -426,6 +421,8 @@ var printData = {
     customer_address: '<?= js_escape($outstock['customer_address']??'') ?>',
     customer_contact: '<?= js_escape($outstock['customer_contact']??'') ?>',
     warehouse_name: '<?= js_escape($outstock['warehouse_name']??'') ?>',
+    employee_name: '<?= js_escape($outstock['employee_name']??'') ?>',
+    employee_phone: '<?= js_escape($outstock['employee_phone']??'') ?>',
     total_amount: '¥<?= format_money($outstock['total_amount']) ?>',
     total_amount_cn: '',
     remark: '<?= js_escape($outstock['remark']??'') ?>',
