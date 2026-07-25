@@ -120,6 +120,11 @@ function run_migrations() {
             "ALTER TABLE products
              ADD COLUMN IF NOT EXISTS description TEXT COMMENT '商品描述（用于产品项目方案单打印）'",
 
+        // ========== 客户开发日期 ==========
+        'customers_developed_at_v2' =>
+            "ALTER TABLE customers
+             ADD COLUMN developed_at DATE DEFAULT NULL COMMENT '开发日期'",
+
         // ========== 销售报价单 ==========
         'sales_quotes_table' =>
             "CREATE TABLE IF NOT EXISTS `sales_quotes` (
@@ -166,15 +171,16 @@ function run_migrations() {
             $count++;
         } catch (Exception $e) {
             // 列/表已存在时忽略错误（兼容不支持 IF NOT EXISTS 的 MySQL 版本）
-            if (stripos($e->getMessage(), 'Duplicate') === false 
-                && stripos($e->getMessage(), 'already exists') === false) {
+            $isDuplicate = (stripos($e->getMessage(), 'Duplicate') !== false 
+                || stripos($e->getMessage(), 'already exists') !== false);
+            if ($isDuplicate) {
+                // 表/列已存在视为迁移完成，标记已执行
+                try {
+                    $pdo->prepare("INSERT IGNORE INTO _migrations (migration_key) VALUES (?)")->execute([$key]);
+                } catch (Exception $ignored) {}
+            } else {
+                // 其他错误：记录日志，不标记已执行（下次会重试）
                 error_log("Migration [$key] failed: " . $e->getMessage());
-            }
-            // 标记为已执行（表/列已存在视为迁移完成）
-            try {
-                $pdo->prepare("INSERT IGNORE INTO _migrations (migration_key) VALUES (?)")->execute([$key]);
-            } catch (Exception $ignored) {
-                // 迁移记录插入失败不影响业务，静默跳过
             }
         }
     }

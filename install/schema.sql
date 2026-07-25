@@ -148,6 +148,7 @@ CREATE TABLE IF NOT EXISTS `customers` (
     `last_followed_at` DATETIME DEFAULT NULL COMMENT '最后跟进时间',
     `intention` ENUM('高','中','低') DEFAULT NULL COMMENT '意向程度',
     `intended_product` VARCHAR(200) DEFAULT '' COMMENT '意向产品',
+    `developed_at` DATE DEFAULT NULL COMMENT '开发日期',
     `created_by` INT DEFAULT NULL COMMENT '创建人(users.id)',
     `initial_balance` DECIMAL(12,2) DEFAULT 0 COMMENT '期初应收',
     `remark` TEXT,

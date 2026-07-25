@@ -2,6 +2,8 @@
 require_once __DIR__ . '/../../includes/header.php';
 require_permission('crm_customer_view');
 $pdo = getDB();
+require_once __DIR__ . '/../../includes/migration.php';
+run_migrations();
 $isAdmin = (get_user_role() === 'admin');
 $userId = get_user_id();
 
@@ -10,6 +12,10 @@ $search = $_GET['search'] ?? '';
 $sourceId = intval($_GET['source_id'] ?? 0);
 $ownerId = $isAdmin ? intval($_GET['owner_id'] ?? 0) : $userId;
 $intention = $_GET['intention'] ?? '';
+$developedFrom = $_GET['developed_from'] ?? '';
+$developedTo = $_GET['developed_to'] ?? '';
+$followFrom = $_GET['follow_from'] ?? '';
+$followTo = $_GET['follow_to'] ?? '';
 $perPage = ITEMS_PER_PAGE;
 $offset = ($page - 1) * $perPage;
 
@@ -22,6 +28,10 @@ if ($search) {
 if ($sourceId > 0) { $where .= " AND c.source_id=?"; $params[] = $sourceId; }
 if ($ownerId > 0) { $where .= " AND c.owner_id=?"; $params[] = $ownerId; }
 if ($intention) { $where .= " AND c.intention=?"; $params[] = $intention; }
+if ($developedFrom) { $where .= " AND c.developed_at>=?"; $params[] = $developedFrom; }
+if ($developedTo) { $where .= " AND c.developed_at<=?"; $params[] = $developedTo; }
+if ($followFrom) { $where .= " AND DATE(c.last_followed_at)>=?"; $params[] = $followFrom; }
+if ($followTo) { $where .= " AND DATE(c.last_followed_at)<=?"; $params[] = $followTo; }
 // 默认排除公海
 $showPool = intval($_GET['pool'] ?? 0);
 if (!$showPool) { $where .= " AND c.in_pool=0"; }
@@ -51,7 +61,7 @@ $owners = $pdo->query("SELECT id, real_name FROM users WHERE status=1 ORDER BY r
     <button class="btn btn-primary" onclick="openCustomerForm()"><i class="fa-solid fa-plus"></i> 新增客户</button>
 </div>
 
-<form class="filter-bar" method="get">
+<form class="filter-bar" method="get" style="flex-wrap:wrap;">
     <div class="search-box"><i class="fa-solid fa-search"></i><input type="text" name="search" class="form-control" placeholder="搜索名称/电话/公司..." value="<?=htmlspecialchars($search)?>"></div>
     <select name="source_id" class="form-control" style="width:120px;">
         <option value="0">全部来源</option>
@@ -69,8 +79,18 @@ $owners = $pdo->query("SELECT id, real_name FROM users WHERE status=1 ORDER BY r
         <option value="中" <?=$intention=='中'?'selected':''?>>中</option>
         <option value="低" <?=$intention=='低'?'selected':''?>>低</option>
     </select>
-    <button type="submit" class="btn btn-primary btn-sm">查询</button>
-    <a href="customers.php" class="btn btn-outline btn-sm">清除</a>
+    <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;">
+        <span style="font-size:13px;color:var(--gray-600);">开发日期</span>
+        <input type="date" name="developed_from" class="form-control" style="width:130px;" value="<?=htmlspecialchars($developedFrom)?>">
+        <span style="color:var(--gray-500);">~</span>
+        <input type="date" name="developed_to" class="form-control" style="width:130px;" value="<?=htmlspecialchars($developedTo)?>">
+        <span style="font-size:13px;color:var(--gray-600);margin-left:8px;">跟进日期</span>
+        <input type="date" name="follow_from" class="form-control" style="width:130px;" value="<?=htmlspecialchars($followFrom)?>">
+        <span style="color:var(--gray-500);">~</span>
+        <input type="date" name="follow_to" class="form-control" style="width:130px;" value="<?=htmlspecialchars($followTo)?>">
+        <button type="submit" class="btn btn-primary btn-sm">查询</button>
+        <a href="customers.php" class="btn btn-outline btn-sm">清除</a>
+    </div>
 </form>
 
 <div class="card"><div class="card-body" style="padding:0;">
@@ -82,7 +102,7 @@ $owners = $pdo->query("SELECT id, real_name FROM users WHERE status=1 ORDER BY r
 <table>
 <thead><tr>
     <th style="width:40px;"><input type="checkbox" id="selectAll" onchange="toggleSelectAll()"></th>
-    <th>客户名称</th><th>电话</th><th>公司</th><th>来源</th><th>意向</th><th>意向产品</th><th>归属</th><th>跟进</th><th>最后跟进</th><th>操作</th>
+    <th>客户名称</th><th>电话</th><th>公司</th><th>来源</th><th>意向</th><th>意向产品</th><th>归属</th><th>跟进</th><th>开发日期</th><th>最后跟进</th><th>操作</th>
 </tr></thead>
 <tbody>
 <?php if ($list): foreach ($list as $item): ?>
@@ -96,6 +116,7 @@ $owners = $pdo->query("SELECT id, real_name FROM users WHERE status=1 ORDER BY r
     <td><?php $prod=$item['intended_product']??''; if($prod): ?><span title="<?=htmlspecialchars($prod)?>" style="cursor:help;"><?=htmlspecialchars(mb_strlen($prod)>8?mb_substr($prod,0,8).'...':$prod)?></span><?php else: ?>-<?php endif; ?></td>
     <td><?=htmlspecialchars($item['owner_name']?:'-')?></td>
     <td><?=$item['followup_count']?>次</td>
+    <td><?=($item['developed_at'] ?? '') ?: '--'?></td>
     <td><?=$item['last_followed_at']?:'--'?></td>
     <td>
         <button class="btn btn-sm btn-outline" onclick="editCustomer(<?=$item['id']?>)" title="编辑"><i class="fa-solid fa-pen"></i></button>
@@ -105,13 +126,13 @@ $owners = $pdo->query("SELECT id, real_name FROM users WHERE status=1 ORDER BY r
     </td>
 </tr>
 <?php endforeach; else: ?>
-<tr><td colspan="11"><div class="empty-state"><i class="fa-solid fa-users"></i><p>暂无客户数据</p></div></td></tr>
+<tr><td colspan="12"><div class="empty-state"><i class="fa-solid fa-users"></i><p>暂无客户数据</p></div></td></tr>
 <?php endif; ?>
 </tbody>
 </table></div></div></div>
 
 <?php if($pages>1): ?><div class="pagination"><span class="info">共<?=$total?>条/<?=$pages?>页</span>
-<?php for($i=max(1,$page-2);$i<=min($pages,$page+2);$i++): ?><a href="?page=<?=$i?>&<?=http_build_query(array_filter(['search'=>$search,'source_id'=>$sourceId,'owner_id'=>$ownerId,'intention'=>$intention]))?>" class="<?=$i==$page?'active':''?>"><?=$i?></a><?php endfor; ?>
+<?php for($i=max(1,$page-2);$i<=min($pages,$page+2);$i++): ?><a href="?page=<?=$i?>&<?=http_build_query(array_filter(['search'=>$search,'source_id'=>$sourceId,'owner_id'=>$ownerId,'intention'=>$intention,'developed_from'=>$developedFrom,'developed_to'=>$developedTo,'follow_from'=>$followFrom,'follow_to'=>$followTo]))?>" class="<?=$i==$page?'active':''?>"><?=$i?></a><?php endfor; ?>
 </div><?php endif; ?>
 
 <!-- 新增/编辑客户弹窗 -->
@@ -130,7 +151,7 @@ $owners = $pdo->query("SELECT id, real_name FROM users WHERE status=1 ORDER BY r
     </div>
     <div class="form-row">
         <div class="form-group"><label class="form-label">联系人</label><input type="text" name="contact" id="custContact" class="form-control"></div>
-        <div class="form-group"><label class="form-label">电话 <span class="required">*</span></label><input type="text" name="phone" id="custPhone" class="form-control" required onblur="checkPhone()">
+        <div class="form-group"><label class="form-label">电话</label><input type="text" name="phone" id="custPhone" class="form-control" onblur="checkPhone()">
             <small id="phoneDup" style="color:var(--danger);display:none;"></small>
         </div>
     </div>
@@ -157,7 +178,7 @@ $owners = $pdo->query("SELECT id, real_name FROM users WHERE status=1 ORDER BY r
     </div>
     <div class="form-row">
         <div class="form-group"><label class="form-label">地址</label><input type="text" name="address" id="custAddress" class="form-control"></div>
-        <div class="form-group"></div>
+        <div class="form-group"><label class="form-label">开发日期</label><input type="date" name="developed_at" id="custDevelopedAt" class="form-control" value="<?=date('Y-m-d')?>"></div>
     </div>
     <div class="form-group"><label class="form-label">备注</label><textarea name="remark" id="custRemark" class="form-control" rows="2"></textarea></div>
 </div>
@@ -267,6 +288,7 @@ function editCustomer(id){
         document.getElementById('custIntention').value=c.intention||'';
         document.getElementById('custIntendedProduct').value=c.intended_product||'';
         document.getElementById('custAddress').value=c.address||'';
+        document.getElementById('custDevelopedAt').value=c.developed_at||'';
         document.getElementById('custRemark').value=c.remark||'';
         document.getElementById('phoneDup').style.display='none';
         document.getElementById('custModalTitle').textContent='编辑客户';

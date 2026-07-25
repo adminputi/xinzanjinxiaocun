@@ -382,7 +382,7 @@
 
     // 数字输入限制
     document.addEventListener('input', function(e) {
-        if (e.target.classList.contains('number-input')) {
+        if (e.target.classList.contains('number-input') && e.target.type !== 'number') {
             e.target.value = e.target.value.replace(/[^\d.]/g, '');
         }
     });

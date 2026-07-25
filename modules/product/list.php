@@ -92,12 +92,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $error = '商品名称和SKU编码不能为空';
         } else {
             if ($id > 0) {
-                $stmt = $pdo->prepare("UPDATE products SET sku=?,name=?,category_id=?,unit_id=?,spec=?,barcode=?,purchase_price=?,sale_price=?,min_stock=?,max_stock=?,remark=?,description=? WHERE id=?");
-                $stmt->execute([$data['sku'],$data['name'],$data['category_id'],$data['unit_id'],$data['spec'],$data['barcode'],$data['purchase_price'],$data['sale_price'],$data['min_stock'],$data['max_stock'],$data['remark'],$data['description'],$id]);
+                if (get_user_role() === 'admin') {
+                    $status = intval($_POST['status'] ?? 1);
+                    $stmt = $pdo->prepare("UPDATE products SET sku=?,name=?,category_id=?,unit_id=?,spec=?,barcode=?,purchase_price=?,sale_price=?,min_stock=?,max_stock=?,remark=?,description=?,status=? WHERE id=?");
+                    $stmt->execute([$data['sku'],$data['name'],$data['category_id'],$data['unit_id'],$data['spec'],$data['barcode'],$data['purchase_price'],$data['sale_price'],$data['min_stock'],$data['max_stock'],$data['remark'],$data['description'],$status,$id]);
+                } else {
+                    $stmt = $pdo->prepare("UPDATE products SET sku=?,name=?,category_id=?,unit_id=?,spec=?,barcode=?,purchase_price=?,sale_price=?,min_stock=?,max_stock=?,remark=?,description=? WHERE id=?");
+                    $stmt->execute([$data['sku'],$data['name'],$data['category_id'],$data['unit_id'],$data['spec'],$data['barcode'],$data['purchase_price'],$data['sale_price'],$data['min_stock'],$data['max_stock'],$data['remark'],$data['description'],$id]);
+                }
                 add_log(get_user_id(), 'update', 'product', "修改商品: {$data['name']}");
             } else {
-                $stmt = $pdo->prepare("INSERT INTO products (sku,name,category_id,unit_id,spec,barcode,purchase_price,sale_price,min_stock,max_stock,remark,description,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)");
-                $stmt->execute([$data['sku'],$data['name'],$data['category_id'],$data['unit_id'],$data['spec'],$data['barcode'],$data['purchase_price'],$data['sale_price'],$data['min_stock'],$data['max_stock'],$data['remark'],$data['description'],date('Y-m-d H:i:s')]);
+                $status = intval($_POST['status'] ?? 1);
+                $stmt = $pdo->prepare("INSERT INTO products (sku,name,category_id,unit_id,spec,barcode,purchase_price,sale_price,min_stock,max_stock,remark,description,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
+                $stmt->execute([$data['sku'],$data['name'],$data['category_id'],$data['unit_id'],$data['spec'],$data['barcode'],$data['purchase_price'],$data['sale_price'],$data['min_stock'],$data['max_stock'],$data['remark'],$data['description'],$status,date('Y-m-d H:i:s')]);
                 add_log(get_user_id(), 'create', 'product', "新增商品: {$data['name']}");
             }
             redirect("list.php?page=$page&search=$search&category_id=$categoryId");
@@ -118,6 +125,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <div class="page-actions">
         <a href="import.php?type=product" class="btn btn-outline"><i class="fa-solid fa-upload"></i> 导入</a>
         <button class="btn btn-outline" onclick="exportProducts()"><i class="fa-solid fa-download"></i> 导出</button>
+        <button class="btn btn-outline" onclick="exportCatalogPDF()"><i class="fa-solid fa-file-pdf"></i> 导出PDF</button>
         <button class="btn btn-primary" onclick="openNewProduct()"><i class="fa-solid fa-plus"></i> 新增商品</button>
     </div>
 </div>
@@ -271,21 +279,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 <div class="form-row">
                     <div class="form-group">
                         <label class="form-label">采购价(¥)</label>
-                        <input type="number" step="0.01" name="purchase_price" id="pprice" class="form-control number-input">
+                        <input type="text" inputmode="decimal" name="purchase_price" id="pprice" class="form-control number-input" placeholder="0.00">
                     </div>
                     <div class="form-group">
                         <label class="form-label">销售价(¥)</label>
-                        <input type="number" step="0.01" name="sale_price" id="sprice" class="form-control number-input">
+                        <input type="text" inputmode="decimal" name="sale_price" id="sprice" class="form-control number-input" placeholder="0.00">
                     </div>
                 </div>
                 <div class="form-row">
                     <div class="form-group">
                         <label class="form-label">最低库存预警</label>
-                        <input type="number" step="0.01" name="min_stock" id="pmin" class="form-control" placeholder="低于此数量预警">
+                        <input type="text" inputmode="decimal" name="min_stock" id="pmin" class="form-control number-input" placeholder="低于此数量预警">
                     </div>
                     <div class="form-group">
                         <label class="form-label">最高库存</label>
-                        <input type="number" step="0.01" name="max_stock" id="pmax" class="form-control">
+                        <input type="text" inputmode="decimal" name="max_stock" id="pmax" class="form-control number-input">
                     </div>
                 </div>
                 <div class="form-group">
@@ -296,6 +304,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     <label class="form-label">备注</label>
                     <textarea name="remark" id="premark" class="form-control" rows="2"></textarea>
                 </div>
+                <?php if (get_user_role() === 'admin'): ?>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">状态</label>
+                        <select name="status" id="pstatus" class="form-control">
+                            <option value="1">启用</option>
+                            <option value="0">禁用</option>
+                        </select>
+                    </div>
+                </div>
+                <?php endif; ?>
                 <div class="form-group">
                     <label class="form-label">商品图片（仅编辑时可上传）</label>
                     <div id="imageUploadArea" style="display:none;">
@@ -382,6 +401,8 @@ function openNewProduct() {
     document.getElementById('pmax').value = '';
     document.getElementById('premark').value = '';
     document.getElementById('pdescription').value = '';
+    var statusSelect = document.getElementById('pstatus');
+    if (statusSelect) statusSelect.value = 1;
     currentEditProductId = 0;
     document.getElementById('imageUploadArea').style.display = 'none';
     document.getElementById('imageUploadHint').style.display = 'inline';
@@ -403,12 +424,14 @@ function editProduct(data) {
     document.getElementById('pcategory').value = data.category_id;
     document.getElementById('punit').value = data.unit_id;
     document.getElementById('pspec').value = data.spec || '';
-    document.getElementById('pprice').value = data.purchase_price;
-    document.getElementById('sprice').value = data.sale_price;
-    document.getElementById('pmin').value = data.min_stock;
-    document.getElementById('pmax').value = data.max_stock;
+    document.getElementById('pprice').value = parseFloat(data.purchase_price) || '';
+    document.getElementById('sprice').value = parseFloat(data.sale_price) || '';
+    document.getElementById('pmin').value = parseFloat(data.min_stock) || '';
+    document.getElementById('pmax').value = parseFloat(data.max_stock) || '';
     document.getElementById('premark').value = data.remark || '';
     document.getElementById('pdescription').value = data.description || '';
+    var statusSelect = document.getElementById('pstatus');
+    if (statusSelect) statusSelect.value = data.status !== undefined ? data.status : 1;
     currentEditProductId = data.id;
     loadProductImages(data.id);
     document.getElementById('imageUploadArea').style.display = 'block';
@@ -559,6 +582,9 @@ function escHtml(str) {
 
 function exportProducts() {
     window.open('list.php?export=xlsx&t=' + Date.now());
+}
+function exportCatalogPDF() {
+    window.open('catalog_print.php?t=' + Date.now());
 }
 </script>
 

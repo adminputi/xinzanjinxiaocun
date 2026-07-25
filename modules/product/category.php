@@ -14,10 +14,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $sortOrder = intval($_POST['sort_order'] ?? 0);
         if ($name) {
             if ($id > 0) {
-                $pdo->prepare("UPDATE product_categories SET name=?,parent_id=?,sort_order=? WHERE id=?")->execute([$name,$parentId,$sortOrder,$id]);
+                if (get_user_role() === 'admin') {
+                    $status = intval($_POST['status'] ?? 1);
+                    $pdo->prepare("UPDATE product_categories SET name=?,parent_id=?,sort_order=?,status=? WHERE id=?")->execute([$name,$parentId,$sortOrder,$status,$id]);
+                } else {
+                    $pdo->prepare("UPDATE product_categories SET name=?,parent_id=?,sort_order=? WHERE id=?")->execute([$name,$parentId,$sortOrder,$id]);
+                }
                 add_log(get_user_id(), 'update', 'category', "修改分类: $name");
             } else {
-                $pdo->prepare("INSERT INTO product_categories (name,parent_id,sort_order,created_at) VALUES (?,?,?,?)")->execute([$name,$parentId,$sortOrder,date('Y-m-d H:i:s')]);
+                $status = intval($_POST['status'] ?? 1);
+                $pdo->prepare("INSERT INTO product_categories (name,parent_id,sort_order,status,created_at) VALUES (?,?,?,?,?)")->execute([$name,$parentId,$sortOrder,$status,date('Y-m-d H:i:s')]);
                 add_log(get_user_id(), 'create', 'category', "新增分类: $name");
             }
         }
@@ -34,7 +40,7 @@ $categories = $pdo->query("SELECT c.*, (SELECT COUNT(*) FROM products WHERE cate
 
 <div class="page-header">
     <h1 class="page-title"><i class="fa-solid fa-tags"></i> 商品分类</h1>
-    <button class="btn btn-primary" onclick="openModal('categoryModal')"><i class="fa-solid fa-plus"></i> 新增分类</button>
+    <button class="btn btn-primary" onclick="showAddCatForm()"><i class="fa-solid fa-plus"></i> 新增分类</button>
 </div>
 
 <div class="card">
@@ -73,6 +79,9 @@ $categories = $pdo->query("SELECT c.*, (SELECT COUNT(*) FROM products WHERE cate
             <div class="modal-body">
                 <div class="form-group"><label class="form-label">分类名称 <span class="required">*</span></label><input type="text" name="name" id="catName" class="form-control" required></div>
                 <div class="form-group"><label class="form-label">排序</label><input type="number" name="sort_order" id="catSort" class="form-control" value="0"></div>
+                <?php if (get_user_role() === 'admin'): ?>
+                <div class="form-group"><label class="form-label">状态</label><select name="status" id="catStatus" class="form-control"><option value="1">启用</option><option value="0">禁用</option></select></div>
+                <?php endif; ?>
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-outline" onclick="closeModal('categoryModal')">取消</button>
@@ -83,6 +92,7 @@ $categories = $pdo->query("SELECT c.*, (SELECT COUNT(*) FROM products WHERE cate
 </div>
 
 <script>
-function editCat(data) { document.getElementById('catTitle').textContent='编辑分类'; document.getElementById('catId').value=data.id; document.getElementById('catName').value=data.name; document.getElementById('catSort').value=data.sort_order; openModal('categoryModal'); }
+function editCat(data) { document.getElementById('catTitle').textContent='编辑分类'; document.getElementById('catId').value=data.id; document.getElementById('catName').value=data.name; document.getElementById('catSort').value=data.sort_order; var s=document.getElementById('catStatus'); if(s) s.value=data.status!==undefined?data.status:1; openModal('categoryModal'); }
+function showAddCatForm() { document.getElementById('catTitle').textContent='新增分类'; document.getElementById('catId').value=0; document.getElementById('catName').value=''; document.getElementById('catSort').value=0; var s=document.getElementById('catStatus'); if(s) s.value=1; openModal('categoryModal'); }
 </script>
 <?php require_once __DIR__ . '/../../includes/footer.php'; ?>

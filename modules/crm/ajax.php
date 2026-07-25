@@ -122,8 +122,27 @@ if ($action === 'assign') {
     $pdo->prepare("UPDATE customers SET owner_id=?, in_pool=0, pooled_at=NULL WHERE id=?")->execute([$toUserId, $customerId]);
     $pdo->prepare("INSERT INTO customer_transfer_logs (customer_id,from_user_id,to_user_id,action,operator_id,created_at) VALUES (?,?,?,?,?,NOW())")
         ->execute([$customerId, $oldOwner, $toUserId, 'assign', get_user_id()]);
-    add_log(get_user_id(), 'assign', 'crm', "分配客户: customer_id={$customerId}, to_user={$toUserId}");
-    json_response(true, '分配成功');
+
+    // 同步更新进行中的报价单业务员（draft/quoted 转移，withdrawn 不转）
+    $stmtQ = $pdo->prepare("UPDATE sales_quotes SET employee_id=? WHERE customer_id=? AND status IN ('draft','quoted')");
+    $stmtQ->execute([$toUserId, $customerId]);
+    $quotesCount = $stmtQ->rowCount();
+
+    // 同步更新进行中的销售订单业务员（draft/confirmed 转移，已完结不转）
+    $stmtO = $pdo->prepare("UPDATE sales_orders SET employee_id=? WHERE customer_id=? AND status IN ('draft','confirmed')");
+    $stmtO->execute([$toUserId, $customerId]);
+    $ordersCount = $stmtO->rowCount();
+
+    $extra = '';
+    if ($quotesCount > 0 || $ordersCount > 0) {
+        $parts = [];
+        if ($quotesCount > 0) $parts[] = "{$quotesCount}笔报价单";
+        if ($ordersCount > 0) $parts[] = "{$ordersCount}笔订单";
+        $extra = '，同步更新' . implode('、', $parts) . '业务员';
+    }
+
+    add_log(get_user_id(), 'assign', 'crm', "分配客户: customer_id={$customerId}, to_user={$toUserId}{$extra}");
+    json_response(true, '分配成功' . $extra . '（跟进记录为历史数据，保留原跟进人不变）');
 }
 
 // ========== 销售经理转移客户给其他经理 ==========
@@ -148,8 +167,27 @@ if ($action === 'transfer') {
     $pdo->prepare("UPDATE customers SET owner_id=?, in_pool=0, pooled_at=NULL WHERE id=?")->execute([$toUserId, $customerId]);
     $pdo->prepare("INSERT INTO customer_transfer_logs (customer_id,from_user_id,to_user_id,action,operator_id,created_at) VALUES (?,?,?,?,?,NOW())")
         ->execute([$customerId, $oldOwner, $toUserId, 'transfer', $userId]);
-    add_log($userId, 'transfer', 'crm', "转移客户: customer_id={$customerId}, to_user={$toUserId}");
-    json_response(true, '转移成功');
+
+    // 同步更新进行中的报价单业务员（draft/quotated 转移，withdrawn 不转）
+    $stmtQ = $pdo->prepare("UPDATE sales_quotes SET employee_id=? WHERE customer_id=? AND status IN ('draft','quoted')");
+    $stmtQ->execute([$toUserId, $customerId]);
+    $quotesCount = $stmtQ->rowCount();
+
+    // 同步更新进行中的销售订单业务员（draft/confirmed 转移，已完结不转）
+    $stmtO = $pdo->prepare("UPDATE sales_orders SET employee_id=? WHERE customer_id=? AND status IN ('draft','confirmed')");
+    $stmtO->execute([$toUserId, $customerId]);
+    $ordersCount = $stmtO->rowCount();
+
+    $extra = '';
+    if ($quotesCount > 0 || $ordersCount > 0) {
+        $parts = [];
+        if ($quotesCount > 0) $parts[] = "{$quotesCount}笔报价单";
+        if ($ordersCount > 0) $parts[] = "{$ordersCount}笔订单";
+        $extra = '，同步更新' . implode('、', $parts) . '业务员';
+    }
+
+    add_log($userId, 'transfer', 'crm', "转移客户: customer_id={$customerId}, to_user={$toUserId}{$extra}");
+    json_response(true, '转移成功' . $extra . '（跟进记录为历史数据，保留原跟进人不变）');
 }
 
 // ========== 关联已有销售订单 ==========
@@ -278,6 +316,26 @@ if ($action === 'get_followup_detail') {
 if ($action === 'get_users') {
     $users = $pdo->query("SELECT id, real_name as name, phone FROM users WHERE status=1 ORDER BY real_name")->fetchAll();
     json_response(true, '', $users);
+}
+
+// ========== 跟进提醒（检查当前用户今日需跟进的客户）==========
+if ($action === 'check_reminders') {
+    $userId = get_user_id();
+    $stmt = $pdo->prepare("
+        SELECT c.id, c.name,
+            (SELECT next_follow_at FROM customer_followups 
+             WHERE customer_id=c.id 
+             ORDER BY created_at DESC LIMIT 1) as next_follow_at
+        FROM customers c
+        WHERE c.owner_id = ? AND c.in_pool = 0 AND c.status = 1
+          AND (SELECT next_follow_at FROM customer_followups 
+               WHERE customer_id=c.id 
+               ORDER BY created_at DESC LIMIT 1) <= CURDATE()
+        ORDER BY next_follow_at DESC
+    ");
+    $stmt->execute([$userId]);
+    $data = $stmt->fetchAll();
+    json_response(true, '', $data);
 }
 
 json_response(false, '未知操作');

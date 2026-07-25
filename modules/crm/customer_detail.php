@@ -66,6 +66,7 @@ $statusBadges = ['draft'=>'warning','confirmed'=>'info','shipped'=>'success','pa
                     <div><strong>来源：</strong><?=htmlspecialchars($cust['source_name'])?:'-'?></div>
                     <div><strong>意向：</strong><?php if($cust['intention']): ?><span class="badge badge-<?=$cust['intention']=='高'?'success':($cust['intention']=='中'?'warning':'info')?>"><?=$cust['intention']?></span><?php else: ?>-<?php endif; ?></div>
                     <div><strong>意向产品：</strong><?=htmlspecialchars($cust['intended_product'])?:'-'?></div>
+                    <div><strong>开发日期：</strong><?=($cust['developed_at'] ?? '') ?: '--'?></div>
                     <div><strong>归属：</strong><?=htmlspecialchars($cust['owner_name']?:'公海')?></div>
                     <?php if ($cust['remark']): ?><div style="grid-column:1/-1;"><strong>备注：</strong><?=nl2br(htmlspecialchars($cust['remark']))?></div><?php endif; ?>
                 </div>

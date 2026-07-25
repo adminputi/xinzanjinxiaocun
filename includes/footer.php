@@ -49,6 +49,86 @@ if (isset($_SESSION['user_id']) && !empty($_GET['debug'])) {
 
 <script src="<?= $basePath ?? '' ?>assets/js/main.js"></script>
 <script src="<?= defined('CDN_CHARTJS') ? CDN_CHARTJS : 'https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js' ?>"></script>
+<?php if (isset($_SESSION['user_id'])): ?>
+<script>
+// ========== 跟进提醒轮询 ==========
+(function(){
+    var dismissed = false;
+    var lastCount = 0;
+
+    function checkReminders() {
+        if (dismissed) return;
+        fetch('<?= $basePath ?? '' ?>modules/crm/ajax.php?action=check_reminders&_=' + Date.now())
+        .then(function(r){return r.json();})
+        .then(function(resp){
+            if (!resp.success || !resp.data || !resp.data.length) {
+                // 没有待跟进客户时，移除之前的弹窗
+                var old = document.getElementById('followupReminder');
+                if (old) old.remove();
+                lastCount = 0;
+                return;
+            }
+            if (resp.data.length === lastCount) return; // 没变化不刷新
+            lastCount = resp.data.length;
+            showPopup(resp.data);
+        })
+        .catch(function(){});
+    }
+
+    function showPopup(customers) {
+        var old = document.getElementById('followupReminder');
+        if (old) old.remove();
+
+        var count = customers.length;
+        var itemsHtml = '';
+        // 最多显示5条
+        var showList = customers.slice(0, 5);
+        for (var i = 0; i < showList.length; i++) {
+            var c = showList[i];
+            itemsHtml += '<div style="font-size:12px;padding:4px 0;border-bottom:1px solid rgba(255,255,255,.15);">'
+                + '<a href="<?= $basePath ?? '' ?>modules/crm/customer_detail.php?id=' + c.id + '" style="color:#fff;text-decoration:underline;" target="_blank">'
+                + escHtml(c.name) + '</a>'
+                + ' <span style="opacity:.7;">计划 ' + (c.next_follow_at || '') + '</span>'
+                + '</div>';
+        }
+        var moreHint = count > 5 ? '<div style="font-size:11px;opacity:.7;text-align:center;margin-top:4px;">+还有' + (count - 5) + '个客户...</div>' : '';
+
+        var html = '<div id="followupReminder" style="position:fixed;bottom:24px;right:24px;z-index:99999;background:#c0392b;color:#fff;border-radius:10px;padding:14px 18px;max-width:360px;min-width:280px;box-shadow:0 6px 24px rgba(192,57,43,.45);animation:frmSlideIn .3s ease;">'
+            + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">'
+            + '<strong style="font-size:14px;">⚠ 跟进提醒</strong>'
+            + '<button onclick="var e=document.getElementById(\'followupReminder\');if(e)e.remove();dismissed=true;" style="background:none;border:none;color:#fff;font-size:18px;cursor:pointer;line-height:1;opacity:.7;">×</button>'
+            + '</div>'
+            + '<div style="font-size:12px;margin-bottom:8px;opacity:.9;">您有 <b>' + count + '</b> 位客户今日需要跟进：</div>'
+            + itemsHtml
+            + moreHint
+            + '<div style="margin-top:10px;text-align:center;">'
+            + '<a href="<?= $basePath ?? '' ?>modules/crm/customers.php?follow_to=' + todayStr() + '" style="color:#ffeaa7;font-size:12px;">查看全部待跟进 →</a>'
+            + '</div>'
+            + '</div>';
+        document.body.insertAdjacentHTML('beforeend', html);
+    }
+
+    function escHtml(s) {
+        return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    function todayStr() {
+        var d = new Date();
+        return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+    }
+
+    // 动画
+    var style = document.createElement('style');
+    style.textContent = '@keyframes frmSlideIn{from{transform:translateX(120%);opacity:0}to{transform:translateX(0);opacity:1}}';
+    document.head.appendChild(style);
+
+    // 页面加载 2 秒后首次检查
+    setTimeout(checkReminders, 2000);
+    // 每 5 分钟检查一次
+    setInterval(checkReminders, 5 * 60 * 1000);
+})();
+</script>
+<?php endif; ?>
 </body>
 </html>
 <?php endif; ?>

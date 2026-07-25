@@ -28,7 +28,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 $templates = $pdo->query("SELECT * FROM print_templates ORDER BY type, is_default DESC")->fetchAll();
-$typeLabels = ['sales_order'=>'销售单','sales_outstock'=>'销售出库单','purchase_order'=>'采购单','purchase_instock'=>'采购入库单','quote'=>'报价方案单'];
+$typeLabels = ['sales_order'=>'销售单','sales_outstock'=>'销售出库单','purchase_order'=>'采购单','purchase_instock'=>'采购入库单','quote'=>'报价方案单','product_catalog'=>'产品目录'];
 
 // 自动初始化"产品项目方案单"模板（首次访问时插入，已存在则跳过）
 $quoteTplName = '产品项目方案单（含图片+描述）';
