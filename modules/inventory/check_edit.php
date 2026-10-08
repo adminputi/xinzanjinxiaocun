@@ -49,15 +49,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         if (!empty($negStockProducts)) {
             $error = '以下商品为负库存，请检查：' . implode('、', $negStockProducts);
+        } elseif (($order['status'] ?? '') === 'confirmed') {
+            // 状态守卫：重复确认会把同一份差异再次计入库存
+            $error = "盘点单 {$order['bill_no']} 已确认，不能重复确认。";
         } else {
             $pdo->beginTransaction();
             try {
                 $st = $pdo->prepare("SELECT * FROM check_items WHERE check_id=?");
                 $st->execute([$id]);
                 $allItems = $st->fetchAll();
+                // 确认时按当前实际库存重算账面数，避免建单到确认之间的出入库被旧差异覆盖
+                $bookStmt = $pdo->prepare("SELECT COALESCE(quantity,0) FROM inventory WHERE product_id=? AND warehouse_id=?");
+                $updItem  = $pdo->prepare("UPDATE check_items SET book_qty=?, diff_qty=? WHERE id=?");
                 foreach ($allItems as $item) {
-                    if ($item['diff_qty'] != 0) {
-                        update_inventory($item['product_id'], $order['warehouse_id'], $item['diff_qty'], 'check', $order['bill_no'], 'check', get_user_id(), '盘点调整');
+                    $bookStmt->execute([$item['product_id'], $order['warehouse_id']]);
+                    $bookQty = floatval($bookStmt->fetchColumn());
+                    $diffQty = floatval($item['actual_qty']) - $bookQty;
+                    $updItem->execute([$bookQty, $diffQty, $item['id']]);
+                    if (abs($diffQty) > 0.000001) {
+                        update_inventory($item['product_id'], $order['warehouse_id'], $diffQty, 'check', $order['bill_no'], 'check', get_user_id(), '盘点调整');
                     }
                 }
                 $pdo->prepare("UPDATE check_orders SET status='confirmed' WHERE id=?")->execute([$id]);

@@ -16,6 +16,8 @@ $developedFrom = $_GET['developed_from'] ?? '';
 $developedTo = $_GET['developed_to'] ?? '';
 $followFrom = $_GET['follow_from'] ?? '';
 $followTo = $_GET['follow_to'] ?? '';
+$deal = $_GET['deal'] ?? '';        // ''全部 / '1'已成交 / '0'未成交
+$sort = $_GET['sort'] ?? '';        // ''默认 / 'deal_amount' / 'last_deal'
 $perPage = ITEMS_PER_PAGE;
 $offset = ($page - 1) * $perPage;
 
@@ -32,9 +34,15 @@ if ($developedFrom) { $where .= " AND c.developed_at>=?"; $params[] = $developed
 if ($developedTo) { $where .= " AND c.developed_at<=?"; $params[] = $developedTo; }
 if ($followFrom) { $where .= " AND DATE(c.last_followed_at)>=?"; $params[] = $followFrom; }
 if ($followTo) { $where .= " AND DATE(c.last_followed_at)<=?"; $params[] = $followTo; }
+if ($deal === '1') { $where .= " AND (" . sql_customer_is_deal('c') . ")"; }
+if ($deal === '0') { $where .= " AND NOT (" . sql_customer_is_deal('c') . ")"; }
 // 默认排除公海
 $showPool = intval($_GET['pool'] ?? 0);
 if (!$showPool) { $where .= " AND c.in_pool=0"; }
+
+$orderBy = 'ORDER BY c.id DESC';
+if ($sort === 'deal_amount') { $orderBy = 'ORDER BY deal_amount DESC'; }
+elseif ($sort === 'last_deal') { $orderBy = 'ORDER BY last_deal_date DESC'; }
 
 $countStmt = $pdo->prepare("SELECT COUNT(*) FROM customers c $where");
 $countStmt->execute($params);
@@ -43,11 +51,12 @@ $pages = ceil($total / $perPage);
 
 $sql = "SELECT c.*, s.name as source_name, u.real_name as owner_name,
     (SELECT COUNT(*) FROM customer_followups WHERE customer_id=c.id) as followup_count,
-    IFNULL(c.intended_product,'') as intended_product
+    IFNULL(c.intended_product,'') as intended_product,
+    " . sql_customer_deal_stats('c') . "
     FROM customers c
     LEFT JOIN customer_sources s ON c.source_id=s.id
     LEFT JOIN users u ON c.owner_id=u.id
-    $where ORDER BY c.id DESC LIMIT $offset,$perPage";
+    $where $orderBy LIMIT $offset,$perPage";
 $stmt = $pdo->prepare($sql);
 $stmt->execute($params);
 $list = $stmt->fetchAll();
@@ -79,6 +88,16 @@ $owners = $pdo->query("SELECT id, real_name FROM users WHERE status=1 ORDER BY r
         <option value="中" <?=$intention=='中'?'selected':''?>>中</option>
         <option value="低" <?=$intention=='低'?'selected':''?>>低</option>
     </select>
+    <select name="deal" class="form-control" style="width:110px;">
+        <option value="">全部成交</option>
+        <option value="1" <?=$deal==='1'?'selected':''?>>已成交</option>
+        <option value="0" <?=$deal==='0'?'selected':''?>>未成交</option>
+    </select>
+    <select name="sort" class="form-control" style="width:130px;">
+        <option value="">默认排序</option>
+        <option value="deal_amount" <?=$sort==='deal_amount'?'selected':''?>>按成交金额</option>
+        <option value="last_deal" <?=$sort==='last_deal'?'selected':''?>>按最近成交</option>
+    </select>
     <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;">
         <span style="font-size:13px;color:var(--gray-600);">开发日期</span>
         <input type="date" name="developed_from" class="form-control" style="width:130px;" value="<?=htmlspecialchars($developedFrom)?>">
@@ -95,7 +114,11 @@ $owners = $pdo->query("SELECT id, real_name FROM users WHERE status=1 ORDER BY r
 
 <div class="card"><div class="card-body" style="padding:0;">
 <div style="padding:8px 16px;display:flex;align-items:center;gap:8px;">
+    <?php // 批量删除原先只认主数据的 customer_edit，与本页新增/编辑用的 crm_customer_edit 不是一套。
+          // 统一为「两者有其一即可」：既对齐语义，也不会让原本有权限的人突然删不动 ?>
+    <?php if (check_permission('crm_customer_edit') || check_permission('customer_edit')): ?>
     <button class="btn btn-sm btn-danger" onclick="batchDelete()"><i class="fa-solid fa-trash"></i> 批量删除</button>
+    <?php endif; ?>
     <a href="export.php?<?=http_build_query($_GET)?>" class="btn btn-sm btn-outline"><i class="fa-solid fa-file-excel"></i> 导出Excel</a>
 </div>
 <div class="table-container">
@@ -106,9 +129,9 @@ $owners = $pdo->query("SELECT id, real_name FROM users WHERE status=1 ORDER BY r
 </tr></thead>
 <tbody>
 <?php if ($list): foreach ($list as $item): ?>
-<tr>
+<tr<?= customer_is_deal($item) ? ' style="background:#f0fdf4;"' : '' ?>>
     <td><input type="checkbox" class="rowCheck" value="<?=$item['id']?>"></td>
-    <td><a href="customer_detail.php?id=<?=$item['id']?>" style="color:var(--primary);font-weight:500;"><?=htmlspecialchars($item['name'])?></a></td>
+    <td><a href="customer_detail.php?id=<?=$item['id']?>" style="color:var(--primary);font-weight:500;"><?=htmlspecialchars($item['name'])?></a><?php if (customer_is_deal($item)): ?> <span class="badge badge-success" title="<?=htmlspecialchars(customer_deal_tip($item))?>">已成交</span><?php endif; ?></td>
     <td><?=htmlspecialchars($item['phone'])?:'-'?></td>
     <td><?=htmlspecialchars($item['company'])?:'-'?></td>
     <td><?=htmlspecialchars($item['source_name'])?:($item['source_id']?'-':'')?></td>
@@ -132,7 +155,7 @@ $owners = $pdo->query("SELECT id, real_name FROM users WHERE status=1 ORDER BY r
 </table></div></div></div>
 
 <?php if($pages>1): ?><div class="pagination"><span class="info">共<?=$total?>条/<?=$pages?>页</span>
-<?php for($i=max(1,$page-2);$i<=min($pages,$page+2);$i++): ?><a href="?page=<?=$i?>&<?=http_build_query(array_filter(['search'=>$search,'source_id'=>$sourceId,'owner_id'=>$ownerId,'intention'=>$intention,'developed_from'=>$developedFrom,'developed_to'=>$developedTo,'follow_from'=>$followFrom,'follow_to'=>$followTo]))?>" class="<?=$i==$page?'active':''?>"><?=$i?></a><?php endfor; ?>
+<?php for($i=max(1,$page-2);$i<=min($pages,$page+2);$i++): ?><a href="?page=<?=$i?>&<?=http_build_query(array_filter(['search'=>$search,'source_id'=>$sourceId,'owner_id'=>$ownerId,'intention'=>$intention,'developed_from'=>$developedFrom,'developed_to'=>$developedTo,'follow_from'=>$followFrom,'follow_to'=>$followTo,'deal'=>$deal,'sort'=>$sort]))?>" class="<?=$i==$page?'active':''?>"><?=$i?></a><?php endfor; ?>
 </div><?php endif; ?>
 
 <!-- 新增/编辑客户弹窗 -->
@@ -148,6 +171,10 @@ $owners = $pdo->query("SELECT id, real_name FROM users WHERE status=1 ORDER BY r
                 <option value="company">企业</option><option value="individual">个人</option>
             </select>
         </div>
+    </div>
+    <div class="form-row">
+        <div class="form-group"><label class="form-label">客户编码</label><input type="text" name="code" id="custCode" class="form-control"><small style="color:var(--gray-500);">留空自动生成</small></div>
+        <div class="form-group"><label class="form-label">期初应收</label><input type="number" step="0.01" name="initial_balance" id="custInitialBalance" class="form-control" value="0"></div>
     </div>
     <div class="form-row">
         <div class="form-group"><label class="form-label">联系人</label><input type="text" name="contact" id="custContact" class="form-control"></div>
@@ -211,8 +238,8 @@ $owners = $pdo->query("SELECT id, real_name FROM users WHERE status=1 ORDER BY r
     </div>
     <div class="form-row">
         <div class="form-group"><label class="form-label">上传附件（合同等）</label>
-            <input type="file" name="attachment" class="form-control">
-            <small style="color:var(--gray-500);">支持 pdf/doc/docx/xlsx/jpg/png，最大10MB</small>
+            <input type="file" name="attachment" class="form-control" accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.pdf,.zip,.rar">
+            <small style="color:var(--gray-500);">支持 JPG/PNG/GIF/WEBP 图片、Word/Excel/PPT、PDF、RAR/ZIP，单个最大 50MB</small>
         </div>
         <div class="form-group"><label class="form-label">计划下次跟进</label>
             <input type="date" name="next_follow_at" class="form-control">
@@ -279,6 +306,8 @@ function editCustomer(id){
         document.getElementById('custId').value=c.id;
         document.getElementById('custName').value=c.name||'';
         document.getElementById('custType').value=c.type||'company';
+        document.getElementById('custCode').value=c.code||'';
+        document.getElementById('custInitialBalance').value=c.initial_balance||'0';
         document.getElementById('custContact').value=c.contact||'';
         document.getElementById('custPhone').value=c.phone||'';
         document.getElementById('custCompany').value=c.company||'';
@@ -341,7 +370,13 @@ function showFollowupModal(cid,cname){
 }
 function saveFollowup(e){
     e.preventDefault();
-    var fd=new FormData(document.getElementById('followupForm'));
+    var form=document.getElementById('followupForm');
+    var fileInput=form.querySelector('input[type=file][name=attachment]');
+    if(fileInput && fileInput.files && fileInput.files[0] && fileInput.files[0].size > 50*1024*1024){
+        alert('附件大小超过 50MB 上限，请压缩后再上传');
+        return false;
+    }
+    var fd=new FormData(form);
     fd.append('action','add_followup');
     var btn = document.querySelector('#followupModal button[type=submit]');
     if(btn){btn.disabled=true;btn.textContent='保存中...';}

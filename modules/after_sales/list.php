@@ -1,14 +1,26 @@
 <?php
 require_once __DIR__ . '/../../includes/header.php';
-require_permission('master_data');
+// 追踪码列表：查看级权限即可进入；具体写操作在 ajax.php 里再按「编辑 / 仅管理员删除」分级校验
+require_tracking_perm(false);
 $pdo = getDB();
 
 $page = max(1, intval($_GET['page'] ?? 1));
 $perPage = ITEMS_PER_PAGE; $offset = ($page-1)*$perPage;
 
-$total = $pdo->query("SELECT COUNT(*) FROM tracking_codes")->fetchColumn();
+// 数据隔离：除管理员 / 拥有 tracking_all 的角色外，只能看到「归属自己客户」的追踪码
+$scope = tracking_scope_where();
+$scopeJoin = " LEFT JOIN sales_outstocks o ON o.id = tc.outstock_id LEFT JOIN customers c ON c.id = o.customer_id";
+
+$totalStmt = $pdo->prepare("SELECT COUNT(*) FROM tracking_codes tc" . $scopeJoin . " WHERE 1=1" . $scope['where']);
+$totalStmt->execute($scope['params']);
+$total = $totalStmt->fetchColumn();
 $pages = ceil($total/$perPage);
-$list = $pdo->query("SELECT tc.*, s.name as status_name FROM tracking_codes tc LEFT JOIN tracking_statuses s ON tc.status_id=s.id ORDER BY tc.id DESC LIMIT $offset,$perPage")->fetchAll();
+
+$listStmt = $pdo->prepare("SELECT tc.*, s.name as status_name FROM tracking_codes tc
+    LEFT JOIN tracking_statuses s ON tc.status_id = s.id" . $scopeJoin . "
+    WHERE 1=1" . $scope['where'] . " ORDER BY tc.id DESC LIMIT $offset,$perPage");
+$listStmt->execute($scope['params']);
+$list = $listStmt->fetchAll();
 
 // 获取每条追踪码的出库单和客户信息
 foreach ($list as &$item) {
@@ -32,7 +44,9 @@ $employees = get_options('users','id','real_name','status=1');
     <h1 class="page-title"><i class="fa-solid fa-qrcode"></i> 追踪码管理</h1>
     <div style="display:flex;gap:8px;">
         <a href="query.php" class="btn btn-outline"><i class="fa-solid fa-search"></i> 查询追踪码</a>
+        <?php if (check_tracking_perm(true)): ?>
         <a href="create.php" class="btn btn-primary"><i class="fa-solid fa-plus"></i> 生成追踪码</a>
+        <?php endif; ?>
     </div>
 </div>
 
@@ -54,10 +68,14 @@ $employees = get_options('users','id','real_name','status=1');
     <td>
         <a href="javascript:void(0)" onclick="viewQrcode(<?=$item['id']?>)" class="btn btn-sm btn-outline" title="查看/下载二维码"><i class="fa-solid fa-qrcode"></i></a>
         <a href="javascript:void(0)" onclick="viewInfo(<?=$item['id']?>)" class="btn btn-sm btn-outline" title="查看追踪信息"><i class="fa-solid fa-eye"></i></a>
+        <?php if (check_tracking_perm(true)): ?>
         <a href="javascript:void(0)" onclick="editTracking(<?=$item['id']?>)" class="btn btn-sm btn-outline" title="编辑"><i class="fa-solid fa-pen"></i></a>
         <a href="javascript:void(0)" onclick="addProcess(<?=$item['id']?>)" class="btn btn-sm btn-primary" title="添加流程"><i class="fa-solid fa-timeline"></i></a>
         <a href="javascript:void(0)" onclick="addAfterSales(<?=$item['id']?>)" class="btn btn-sm btn-warning" title="添加售后"><i class="fa-solid fa-headset"></i></a>
+        <?php endif; ?>
+        <?php if (($_SESSION['user_role'] ?? '') === 'admin'): ?>
         <a href="javascript:void(0)" onclick="deleteTracking(<?=$item['id']?>,'<?=htmlspecialchars(addslashes($item['tracking_no']))?>')" class="btn btn-sm btn-danger" title="删除"><i class="fa-solid fa-trash"></i></a>
+        <?php endif; ?>
     </td>
 </tr>
 <?php endforeach; else: ?>
@@ -218,6 +236,9 @@ var pPendingImages=[], asPendingImages=[], epPendingImages=[], eaPendingImages=[
 var uploadToken = <?=json_encode($_SESSION['upload_token'] ?? '')?>;
 var currentTrackingData = null; // 缓存当前查看的追踪数据
 var isAdmin = <?=$_SESSION['user_role']==='admin'?'true':'false'?>;
+// 追踪码权限分级：编辑/添加流程/添加售后 = tracking_edit；删除 = 仅管理员
+var canEdit = <?=check_tracking_perm(true)?'true':'false'?>;
+var canDelete = <?=$_SESSION['user_role']==='admin'?'true':'false'?>;
 
 // ========== 二维码 ==========
 function viewQrcode(id){
@@ -421,10 +442,10 @@ function viewInfo(id){
                 // 第一行：时间 + 操作按钮
                 html+='<div style="display:flex;justify-content:space-between;align-items:center;min-height:22px;">';
                 html+='<div style="font-size:12px;color:var(--gray-500);">'+escHtml(p.created_at)+'</div>';
-                if(isAdmin){
+                if(canEdit||canDelete){
                     html+='<div style="display:flex;gap:4px;flex-shrink:0;">';
-                    html+='<button class="btn btn-sm btn-outline" onclick="event.stopPropagation();editProcess('+p.id+')" title="编辑流程"><i class="fa-solid fa-pen"></i></button>';
-                    html+='<button class="btn btn-sm btn-danger" onclick="event.stopPropagation();deleteProcess('+p.id+')" title="删除流程"><i class="fa-solid fa-trash"></i></button>';
+                    if(canEdit) html+='<button class="btn btn-sm btn-outline" onclick="event.stopPropagation();editProcess('+p.id+')" title="编辑流程"><i class="fa-solid fa-pen"></i></button>';
+                    if(canDelete) html+='<button class="btn btn-sm btn-danger" onclick="event.stopPropagation();deleteProcess('+p.id+')" title="删除流程"><i class="fa-solid fa-trash"></i></button>';
                     html+='</div>';
                 }
                 html+='</div>';
@@ -450,10 +471,10 @@ function viewInfo(id){
                 // 第一行：时间 + 操作按钮
                 html+='<div style="display:flex;justify-content:space-between;align-items:center;min-height:22px;">';
                 html+='<div style="font-size:12px;color:var(--gray-500);">'+escHtml(a.created_at)+'</div>';
-                if(isAdmin){
+                if(canEdit||canDelete){
                     html+='<div style="display:flex;gap:4px;flex-shrink:0;">';
-                    html+='<button class="btn btn-sm btn-outline" onclick="event.stopPropagation();editAfterSales('+a.id+')" title="编辑售后"><i class="fa-solid fa-pen"></i></button>';
-                    html+='<button class="btn btn-sm btn-danger" onclick="event.stopPropagation();deleteAfterSales('+a.id+')" title="删除售后"><i class="fa-solid fa-trash"></i></button>';
+                    if(canEdit) html+='<button class="btn btn-sm btn-outline" onclick="event.stopPropagation();editAfterSales('+a.id+')" title="编辑售后"><i class="fa-solid fa-pen"></i></button>';
+                    if(canDelete) html+='<button class="btn btn-sm btn-danger" onclick="event.stopPropagation();deleteAfterSales('+a.id+')" title="删除售后"><i class="fa-solid fa-trash"></i></button>';
                     html+='</div>';
                 }
                 html+='</div>';

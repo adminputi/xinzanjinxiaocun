@@ -50,6 +50,13 @@ if ($search) {
 if ($sourceId > 0) { $where .= " AND c.source_id=?"; $params[] = $sourceId; }
 if ($ownerId > 0) { $where .= " AND c.owner_id=?"; $params[] = $ownerId; }
 if ($intention) { $where .= " AND c.intention=?"; $params[] = $intention; }
+$deal = $_GET['deal'] ?? '';
+if ($deal === '1') { $where .= " AND (" . sql_customer_is_deal('c') . ")"; }
+if ($deal === '0') { $where .= " AND NOT (" . sql_customer_is_deal('c') . ")"; }
+$sort = $_GET['sort'] ?? '';
+$orderBy = 'ORDER BY c.id DESC';
+if ($sort === 'deal_amount') { $orderBy = 'ORDER BY deal_amount DESC'; }
+elseif ($sort === 'last_deal') { $orderBy = 'ORDER BY last_deal_date DESC'; }
 $showPool = intval($_GET['pool'] ?? 0);
 if (!$showPool) { $where .= " AND c.in_pool=0"; }
 
@@ -58,11 +65,12 @@ $sql = "SELECT c.code, c.name, c.type, c.contact, c.phone, c.email, c.wechat, c.
     (SELECT COUNT(*) FROM customer_followups WHERE customer_id=c.id) as followup_count,
     (SELECT COUNT(*) FROM sales_orders WHERE customer_id=c.id) as order_count,
     (SELECT COALESCE(SUM(total_amount),0) FROM sales_orders WHERE customer_id=c.id AND status NOT IN('draft','cancelled')) as total_sales,
+    " . sql_customer_deal_stats('c') . ",
     c.last_followed_at, c.created_at
     FROM customers c
     LEFT JOIN customer_sources s ON c.source_id=s.id
     LEFT JOIN users u ON c.owner_id=u.id
-    $where ORDER BY c.id DESC";
+    $where $orderBy";
 
 $stmt = $pdo->prepare($sql);
 $stmt->execute($params);
@@ -71,7 +79,7 @@ $list = $stmt->fetchAll();
 $headers = [
     '客户编码', '客户名称', '客户类型', '联系人', '电话', '邮箱', '微信号', '公司名称', '地址',
     '来源', '归属经理', '意向程度', '意向产品', '备注',
-    '跟进次数', '订单数', '累计消费', '最后跟进时间', '创建时间'
+    '跟进次数', '订单数', '累计消费', '是否成交', '最后跟进时间', '创建时间'
 ];
 
 $data = [];
@@ -94,6 +102,7 @@ foreach ($list as $row) {
         $row['followup_count'],
         $row['order_count'],
         $row['total_sales'],
+        customer_is_deal($row) ? '是' : '否',
         $row['last_followed_at'],
         $row['created_at'],
     ];

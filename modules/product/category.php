@@ -29,8 +29,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     } elseif ($action === 'delete') {
         $id = intval($_POST['id'] ?? 0);
-        $pdo->prepare("DELETE FROM product_categories WHERE id=?")->execute([$id]);
-        add_log(get_user_id(), 'delete', 'category', "删除分类ID: $id");
+        $chk = check_refs($id, [
+            '商品'   => "SELECT COUNT(*) FROM products WHERE category_id=?",
+            '子分类' => "SELECT COUNT(*) FROM product_categories WHERE parent_id=?",
+        ]);
+        if (!$chk['ok']) {
+            flash_set($chk['msg']);
+        } else {
+            $pdo->prepare("DELETE FROM product_categories WHERE id=?")->execute([$id]);
+            add_log(get_user_id(), 'delete', 'category', "删除分类ID: $id");
+            flash_set('分类已删除', 'success');
+        }
     }
     redirect('category.php');
 }
@@ -38,6 +47,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 $categories = $pdo->query("SELECT c.*, (SELECT COUNT(*) FROM products WHERE category_id=c.id) as product_count FROM product_categories c ORDER BY sort_order, id")->fetchAll();
 ?>
 
+<?php flash_show(); ?>
 <div class="page-header">
     <h1 class="page-title"><i class="fa-solid fa-tags"></i> 商品分类</h1>
     <button class="btn btn-primary" onclick="showAddCatForm()"><i class="fa-solid fa-plus"></i> 新增分类</button>

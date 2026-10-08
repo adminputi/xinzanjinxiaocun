@@ -91,7 +91,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>登录 - <?= $loginSiteName ?></title>
-    <link rel="stylesheet" href="<?= defined('CDN_FONTAWESOME') ? CDN_FONTAWESOME : 'https://cdn.bootcdn.net/ajax/libs/font-awesome/6.4.0/css/all.min.css' ?>">
+    <link rel="stylesheet" href="assets/fontawesome/css/all.min.css">
     <style>
         :root { --primary: #4361ee; --danger: #ef4444; --gray-100: #f1f5f9; --gray-300: #cbd5e1; --gray-500: #64748b; --gray-600: #475569; --gray-700: #334155; --gray-800: #1e293b; --radius: 8px; --radius-lg: 12px; --shadow-lg: 0 20px 60px rgba(0,0,0,0.15); }
         * { margin: 0; padding: 0; box-sizing: border-box; }

@@ -15,9 +15,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'add_cus
     }
     // CSRF验证
     $token = $_POST['_csrf_token'] ?? '';
-    if (empty($_SESSION['csrf_token']) || !hash_equals($_SESSION['csrf_token'], $token)) {
+    if (!csrf_is_valid($token)) {
+        csrf_regenerate();
         header('Content-Type: application/json; charset=utf-8');
-        echo json_encode(['success'=>false,'message'=>'安全验证失败，请刷新页面重试'], JSON_UNESCAPED_UNICODE);
+        echo json_encode(['success'=>false,'message'=>'页面已过期（安全验证失败），请刷新页面后重试','csrf_expired'=>true,'csrf_token'=>$_SESSION['csrf_token']], JSON_UNESCAPED_UNICODE);
         exit;
     }
     $name = trim($_POST['cust_name'] ?? '');

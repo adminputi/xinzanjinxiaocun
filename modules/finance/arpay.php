@@ -3,30 +3,22 @@ require_once __DIR__ . '/../../includes/header.php';
 require_permission('finance_arpay');
 $pdo = getDB();
 
-// 应收汇总（含期初应收，减已确认退货）
-$receivables = $pdo->query("SELECT c.id, c.name as customer_name, c.phone, c.initial_balance,
-    COALESCE(SUM(so.total_amount),0) as order_total,
-    COALESCE(SUM(so.received_amount),0) as received_total,
-    (SELECT COALESCE(SUM(total_amount),0) FROM sales_returns WHERE customer_id=c.id AND status='confirmed') as return_total,
-    COUNT(DISTINCT so.id) as order_count
-FROM customers c
-LEFT JOIN sales_orders so ON c.id=so.customer_id AND so.status NOT IN('draft','cancelled')
-WHERE c.status=1
-GROUP BY c.id HAVING COALESCE(SUM(so.total_amount),0)+c.initial_balance > 0 ORDER BY (COALESCE(SUM(so.total_amount),0)-COALESCE(SUM(so.received_amount),0)+c.initial_balance-(SELECT COALESCE(SUM(total_amount),0) FROM sales_returns WHERE customer_id=c.id AND status='confirmed')) DESC")->fetchAll();
+// 应收/应付一律走统一口径函数，保证与首页看板、账龄分析、客户对账算出同一个数
+$arRows  = get_ar_by_customer(0);
+$apRows  = get_ap_by_supplier(0);
+$arTotal = get_ar_totals();
+$apTotal = get_ap_totals();
 
-// 应付汇总（减已确认退货）
-$payables = $pdo->query("SELECT s.id, s.name as supplier_name, s.phone,
-    COALESCE(SUM(po.total_amount),0) as order_total,
-    COALESCE(SUM(po.paid_amount),0) as paid_total,
-    (SELECT COALESCE(SUM(total_amount),0) FROM purchase_returns WHERE supplier_id=s.id AND status='confirmed') as return_total,
-    COUNT(DISTINCT po.id) as order_count
-FROM suppliers s
-LEFT JOIN purchase_orders po ON s.id=po.supplier_id AND po.status NOT IN('draft','cancelled')
-WHERE s.status=1
-GROUP BY s.id HAVING COALESCE(SUM(po.total_amount),0) > 0 ORDER BY (COALESCE(SUM(po.total_amount),0)-COALESCE(SUM(po.paid_amount),0)-(SELECT COALESCE(SUM(total_amount),0) FROM purchase_returns WHERE supplier_id=s.id AND status='confirmed')) DESC")->fetchAll();
+// 保持原展示范围：有订单或有期初应收的客户才列入
+$receivables = array_values(array_filter($arRows, function ($r) {
+    return $r['order_total'] > 0 || abs($r['initial']) > 0.000001;
+}));
+$payables = array_values(array_filter($apRows, function ($p) {
+    return $p['order_total'] > 0;
+}));
 
-$totalAR = array_sum(array_map(function($r){return $r['order_total']-$r['received_total']+$r['initial_balance']-$r['return_total'];}, $receivables));
-$totalAP = array_sum(array_map(function($p){return $p['order_total']-$p['paid_total']-$p['return_total'];}, $payables));
+$totalAR = $arTotal['balance'];
+$totalAP = $apTotal['balance'];
 ?>
 
 <div class="page-header">
@@ -49,13 +41,13 @@ $totalAP = array_sum(array_map(function($p){return $p['order_total']-$p['paid_to
     <table>
     <thead><tr><th>客户</th><th>电话</th><th>订单数</th><th>订单金额</th><th>已收金额</th><th>应收余额</th></tr></thead>
     <tbody>
-    <?php if ($receivables): foreach ($receivables as $r): $bal = $r['order_total'] - $r['received_total'] + $r['initial_balance'] - $r['return_total']; ?>
+    <?php if ($receivables): foreach ($receivables as $r): $bal = $r['balance']; ?>
     <tr>
-        <td><strong><?=htmlspecialchars($r['customer_name'])?></strong></td>
-        <td><?=htmlspecialchars($r['phone']?:'-')?></td>
+        <td><strong><?=htmlspecialchars($r['name'])?></strong></td>
+        <td><?=htmlspecialchars(($r['phone'] ?? '') ?: '-')?></td>
         <td><span class="badge badge-info"><?=$r['order_count']?></span></td>
-        <td>¥<?=format_money($r['order_total']+$r['initial_balance'])?></td>
-        <td style="color:var(--success)">¥<?=format_money($r['received_total'])?></td>
+        <td>¥<?=format_money($r['order_total']+$r['initial'])?></td>
+        <td style="color:var(--success)">¥<?=format_money($r['received'])?></td>
         <td style="color:<?=$bal>0?'var(--danger)':'var(--success)'?>;font-weight:bold;">¥<?=format_money($bal)?></td>
     </tr>
     <?php endforeach; else: ?>
@@ -71,13 +63,13 @@ $totalAP = array_sum(array_map(function($p){return $p['order_total']-$p['paid_to
     <table>
     <thead><tr><th>供应商</th><th>电话</th><th>订单数</th><th>订单金额</th><th>已付金额</th><th>应付余额</th></tr></thead>
     <tbody>
-    <?php if ($payables): foreach ($payables as $p): $bal = $p['order_total'] - $p['paid_total'] - $p['return_total']; ?>
+    <?php if ($payables): foreach ($payables as $p): $bal = $p['balance']; ?>
     <tr>
-        <td><strong><?=htmlspecialchars($p['supplier_name'])?></strong></td>
-        <td><?=htmlspecialchars($p['phone']?:'-')?></td>
+        <td><strong><?=htmlspecialchars($p['name'])?></strong></td>
+        <td><?=htmlspecialchars(($p['phone'] ?? '') ?: '-')?></td>
         <td><span class="badge badge-info"><?=$p['order_count']?></span></td>
         <td>¥<?=format_money($p['order_total'])?></td>
-        <td style="color:var(--success)">¥<?=format_money($p['paid_total'])?></td>
+        <td style="color:var(--success)">¥<?=format_money($p['paid'])?></td>
         <td style="color:<?=$bal>0?'var(--danger)':'var(--success)'?>;font-weight:bold;">¥<?=format_money($bal)?></td>
     </tr>
     <?php endforeach; else: ?>

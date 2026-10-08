@@ -1,7 +1,10 @@
 <?php
 require_once __DIR__ . '/includes/header.php';
+require_once __DIR__ . '/includes/migration.php';
 
 $pdo = getDB();
+// 确保新增字段（如库存平均成本、收款状态）已就绪，避免查询时字段不存在
+run_migrations();
 
 // 统计数据
 $stats = [];
@@ -9,8 +12,8 @@ $stats = [];
 // 商品总数
 $stats['products'] = $pdo->query("SELECT COUNT(*) FROM products WHERE status=1")->fetchColumn();
 
-// 库存总价值
-$stmt = $pdo->query("SELECT SUM(i.quantity * p.purchase_price) FROM inventory i JOIN products p ON i.product_id=p.id");
+// 库存总价值（优先用移动加权平均成本，未计算成本的回退采购价）
+$stmt = $pdo->query("SELECT COALESCE(SUM(i.quantity * CASE WHEN COALESCE(i.avg_cost,0)>0 THEN i.avg_cost ELSE p.purchase_price END),0) FROM inventory i JOIN products p ON i.product_id=p.id");
 $stats['stock_value'] = $stmt->fetchColumn() ?: 0;
 
 // 低库存商品数
@@ -25,18 +28,13 @@ $stats['purchase_month'] = $stmt->fetchColumn();
 $stmt = $pdo->query("SELECT COALESCE(SUM(total_amount),0) FROM sales_outstocks WHERE status='confirmed' AND MONTH(outstock_date)=MONTH(CURDATE()) AND YEAR(outstock_date)=YEAR(CURDATE())");
 $stats['sales_month'] = $stmt->fetchColumn();
 
-// 应收（含期初应收 + 全部有效订单的未收余额 - 已确认退货）
-$stmt = $pdo->query("SELECT COALESCE(SUM(total_amount - received_amount),0) FROM sales_orders WHERE status NOT IN('draft','cancelled')");
-$orderReceivable = $stmt->fetchColumn();
-$initialAR = $pdo->query("SELECT COALESCE(SUM(initial_balance),0) FROM customers WHERE status=1")->fetchColumn();
-$returnsAR = $pdo->query("SELECT COALESCE(SUM(total_amount),0) FROM sales_returns WHERE status='confirmed'")->fetchColumn();
-$stats['receivable'] = $orderReceivable + $initialAR - $returnsAR;
-
-// 应付（全部有效订单的未付余额 - 已确认退货）
-$stmt = $pdo->query("SELECT COALESCE(SUM(total_amount - paid_amount),0) FROM purchase_orders WHERE status NOT IN('draft','cancelled')");
-$orderPayable = $stmt->fetchColumn();
-$returnsAP = $pdo->query("SELECT COALESCE(SUM(total_amount),0) FROM purchase_returns WHERE status='confirmed'")->fetchColumn();
-$stats['payable'] = $orderPayable - $returnsAP;
+// 应收/应付统一口径：与「应收应付」「账龄分析」「客户对账」使用同一函数，四处不会再算出四个数
+//   应收余额 = 有效订单总额 - 已收 + 客户期初 - 已确认退货
+//   应付余额 = 有效采购订单总额 - 已付 - 已确认采购退货
+$arTotals = get_ar_totals();
+$apTotals = get_ap_totals();
+$stats['receivable'] = $arTotals['balance'];
+$stats['payable']    = $apTotals['balance'];
 
 // 待审批单据
 $stats['pending_purchase'] = $pdo->query("SELECT COUNT(*) FROM purchase_orders WHERE status='draft'")->fetchColumn();
@@ -74,14 +72,13 @@ $topProducts = $topStmt->fetchAll();
 $warnStmt = $pdo->query("SELECT p.id, p.name, p.sku, p.min_stock, p.purchase_price, COALESCE(i.quantity,0) as quantity FROM products p LEFT JOIN (SELECT product_id, SUM(quantity) as quantity FROM inventory GROUP BY product_id) i ON p.id=i.product_id WHERE p.min_stock>0 AND p.status=1 AND COALESCE(i.quantity,0)<=p.min_stock ORDER BY (COALESCE(i.quantity,0)-p.min_stock) LIMIT 10");
 $warnProducts = $warnStmt->fetchAll();
 
-// 应收账款-近期待收
-$agingStmt = $pdo->query("SELECT 
-    SUM(CASE WHEN order_date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) THEN total_amount - received_amount ELSE 0 END) as within30,
-    SUM(CASE WHEN order_date >= DATE_SUB(CURDATE(), INTERVAL 60 DAY) AND order_date < DATE_SUB(CURDATE(), INTERVAL 30 DAY) THEN total_amount - received_amount ELSE 0 END) as within60,
-    SUM(CASE WHEN order_date >= DATE_SUB(CURDATE(), INTERVAL 90 DAY) AND order_date < DATE_SUB(CURDATE(), INTERVAL 60 DAY) THEN total_amount - received_amount ELSE 0 END) as within90,
-    SUM(CASE WHEN order_date < DATE_SUB(CURDATE(), INTERVAL 90 DAY) THEN total_amount - received_amount ELSE 0 END) as over90
-FROM sales_orders WHERE status NOT IN('draft','cancelled')");
-$aging = $agingStmt->fetch();
+// 应收账款-账龄分桶（与账龄分析页同源：期初应收归入 90 天以上）
+$aging = [
+    'within30' => $arTotals['within30'],
+    'within60' => $arTotals['within60'],
+    'within90' => $arTotals['within90'],
+    'over90'   => $arTotals['over90'],
+];
 
 // ==================== CRM 统计数据（仅授权用户） ====================
 $showCrm = check_permission('crm_customer_view');

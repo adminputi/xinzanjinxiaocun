@@ -47,7 +47,7 @@ $suppliers = get_options('suppliers','id','name','status=1');
 </div>
 
 <form class="filter-bar" method="get">
-    <select name="supplier_id" class="form-control" style="min-width:180px;">
+    <select name="supplier_id" class="form-control searchable" style="min-width:180px;">
         <option value="0">全部供应商</option>
         <?php foreach($suppliers as $k=>$v): ?><option value="<?=$k?>" <?=$supplierId==$k?'selected':''?>><?=$v?></option><?php endforeach; ?>
     </select>

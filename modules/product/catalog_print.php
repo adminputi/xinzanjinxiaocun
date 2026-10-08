@@ -3,15 +3,29 @@ require_once __DIR__ . '/../../includes/header.php';
 require_permission('product_view');
 $pdo = getDB();
 
-// 查询所有启用商品（含图片和描述）
-$products = $pdo->query("SELECT p.*, c.name as category_name, u.name as unit_name
+// 查询商品（含图片和描述）：跟随从列表页传来的筛选条件，没传条件时导出全部启用商品
+$filter = build_product_filter();
+$stmt = $pdo->prepare("SELECT p.*, c.name as category_name, u.name as unit_name
     FROM products p
     LEFT JOIN product_categories c ON p.category_id=c.id
     LEFT JOIN units u ON p.unit_id=u.id
-    WHERE p.status=1 ORDER BY p.id")->fetchAll();
+    WHERE p.status=1" . $filter['cond'] . " ORDER BY p.id");
+$stmt->execute($filter['params']);
+$products = $stmt->fetchAll();
+
+// 当前筛选条件的文字描述，打印页顶部显示，避免导出后不知道导的是哪一批
+$filterDesc = [];
+if ($filter['search'] !== '') $filterDesc[] = '关键词“' . $filter['search'] . '”';
+if ($filter['category_id'] > 0) {
+    $cStmt = $pdo->prepare("SELECT name FROM product_categories WHERE id=?");
+    $cStmt->execute([$filter['category_id']]);
+    $cName = $cStmt->fetchColumn();
+    $filterDesc[] = '分类“' . ($cName ?: ('#' . $filter['category_id'])) . '”';
+}
+$hasFilter = !empty($filterDesc);
 
 // 确保打印模板表存在
-try { $pdo->exec("CREATE TABLE IF NOT EXISTS `print_templates` (`id` INT AUTO_INCREMENT PRIMARY KEY, `name` VARCHAR(100) NOT NULL, `type` VARCHAR(30) NOT NULL DEFAULT 'product_catalog', `content` TEXT, `is_default` TINYINT DEFAULT 0, `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"); } catch (Exception $e) {}
+ensure_print_templates_table($pdo);
 
 // 从数据库加载"产品目录"模板，首次访问时自动初始化
 $catalogTplName = '产品目录（含图片+描述）';
@@ -45,8 +59,12 @@ if (!$tpl) {
     . '<strong>备注：</strong><br>{remark}'
     . '</div>'
     . '</div>';
-    $pdo->prepare("INSERT INTO print_templates (name,type,content,is_default) VALUES (?,?,?,1)")
-        ->execute([$catalogTplName, 'product_catalog', $defaultCatalogTpl]);
+    try {
+        $pdo->prepare("INSERT INTO print_templates (name,type,content,is_default) VALUES (?,?,?,1)")
+            ->execute([$catalogTplName, 'product_catalog', $defaultCatalogTpl]);
+    } catch (Exception $e) {
+        error_log('print_templates catalog init failed: ' . $e->getMessage());
+    }
     $tplContent = $defaultCatalogTpl;
 } else {
     $tplContent = $tpl['content'];
@@ -138,7 +156,17 @@ function echoProductRow($idx, $prod, $columns, $colMap) {
 }
 ?>
 <div class="d-flex-between mb-3" style="flex-wrap:wrap;gap:10px;">
-    <h3 style="margin:0;"><i class="fa-solid fa-book"></i> 产品目录</h3>
+    <div>
+        <h3 style="margin:0;"><i class="fa-solid fa-book"></i> 产品目录</h3>
+        <?php if ($hasFilter): ?>
+        <div style="font-size:13px;color:#666;margin-top:6px;">
+            已按 <?= htmlspecialchars(implode('、', $filterDesc)) ?> 筛选，仅含启用商品 ·
+            <a href="catalog_print.php">导出全部</a> · <a href="list.php">回列表</a>
+        </div>
+        <?php else: ?>
+        <div style="font-size:13px;color:#666;margin-top:6px;">全部启用商品 · <a href="list.php">回列表筛选后再导出</a></div>
+        <?php endif; ?>
+    </div>
     <div style="display:flex;gap:10px;align-items:center;">
         <span style="font-size:14px;color:#666;">共 <strong><?= count($products) ?></strong> 个产品</span>
         <button class="btn btn-primary" onclick="printCatalog()"><i class="fa-solid fa-print"></i> 打印产品目录</button>

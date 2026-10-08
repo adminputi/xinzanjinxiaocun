@@ -47,8 +47,18 @@ if (isset($_SESSION['user_id']) && !empty($_GET['debug'])) {
     </main><!-- /main-content -->
 </div><!-- /app-container -->
 
-<script src="<?= $basePath ?? '' ?>assets/js/main.js"></script>
-<script src="<?= defined('CDN_CHARTJS') ? CDN_CHARTJS : 'https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js' ?>"></script>
+<?php $mainJs = __DIR__ . '/../assets/js/main.js'; ?>
+<?php $printImageJs = __DIR__ . '/../assets/js/print-image.js'; ?>
+<script src="<?= $basePath ?? '' ?>assets/js/print-image.js?v=<?= file_exists($printImageJs) ? filemtime($printImageJs) : time() ?>"></script>
+<script src="<?= $basePath ?? '' ?>assets/js/main.js?v=<?= file_exists($mainJs) ? filemtime($mainJs) : time() ?>"></script>
+<script src="<?= $basePath ?? '' ?>assets/js/chart.js/chart.umd.min.js"></script>
+<script>
+// 页面内联脚本位于本文件之前，浏览器尚未执行；main.js 已就绪，这里立即执行它们
+// （并初始化可搜索下拉/AJAX导航/表单重绑），避免首屏页面功能未定义
+(function(){
+    if (window.__bootApp) { window.__bootApp(); }
+})();
+</script>
 <?php if (isset($_SESSION['user_id'])): ?>
 <script>
 // ========== 跟进提醒轮询 ==========

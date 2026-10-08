@@ -12,20 +12,12 @@ $dateTo = $_GET['date_to'] ?? date('Y-m-d');
 // 销售对账：以销售订单为核心，计算每个客户的订单总额、已收金额、应收余额
 // 出库和退货作为辅助数据单独查询，避免 LEFT JOIN 产生笛卡尔积
 // 非admin用户只看自己创建的单据
-$userIdJoin = $isAdminRec ? '' : "AND so.user_id = $uid";
-$sql = "SELECT c.id, c.name as customer_name, c.phone, c.initial_balance,
-    COALESCE(SUM(so.total_amount),0) as order_total,
-    COALESCE(SUM(so.received_amount),0) as received_total,
-    COUNT(DISTINCT so.id) as order_count
-FROM customers c
-LEFT JOIN sales_orders so ON c.id=so.customer_id AND so.order_date BETWEEN ? AND ? AND so.status NOT IN('draft','cancelled') $userIdJoin
-WHERE c.status=1 ";
-$params = [$dateFrom,$dateTo];
-if ($customerId) { $sql .= "AND c.id=?"; $params[] = $customerId; }
-$sql .= " GROUP BY c.id ORDER BY (COALESCE(SUM(so.total_amount),0)-COALESCE(SUM(so.received_amount),0)) DESC";
-
-$stmt = $pdo->prepare($sql); $stmt->execute($params);
-$summaries = $stmt->fetchAll();
+// 应收余额统一口径：订单总额 - 已收 + 期初应收 - 已确认退货（与首页看板、应收应付、账龄分析同源）
+$summaries = get_ar_by_customer($customerId, [
+    'date_from' => $dateFrom,
+    'date_to'   => $dateTo,
+    'user_id'   => $isAdminRec ? 0 : $uid,
+]);
 
 // 出库和退货数据单独查询（避免 LEFT JOIN 笛卡尔积）
 $outstockData = []; $returnData = [];
@@ -45,8 +37,8 @@ if ($summaries) {
 
 $customers = $isAdminRec ? get_options('customers','id','name','status=1') : get_options('customers','id','name',[['status','=',1],['owner_id','=',get_user_id()]]);
 $totalOrder = array_sum(array_column($summaries,'order_total'));
-$totalReceived = array_sum(array_column($summaries,'received_total'));
-$totalInitial = array_sum(array_column($summaries,'initial_balance'));
+$totalReceived = array_sum(array_column($summaries,'received'));
+$totalInitial = array_sum(array_column($summaries,'initial'));
 $totalOutstock = array_sum($outstockData);
 $totalReturn = array_sum($returnData);
 ?>
@@ -57,7 +49,7 @@ $totalReturn = array_sum($returnData);
 </div>
 
 <form class="filter-bar" method="get">
-    <select name="customer_id" class="form-control" style="min-width:180px;">
+    <select name="customer_id" class="form-control searchable" style="min-width:180px;">
         <option value="0">全部客户</option>
         <?php foreach($customers as $k=>$v): ?><option value="<?=$k?>" <?=$customerId==$k?'selected':''?>><?=$v?></option><?php endforeach; ?>
     </select>
@@ -79,17 +71,18 @@ $totalReturn = array_sum($returnData);
 <thead><tr><th>客户</th><th>电话</th><th>订单金额</th><th>已收金额</th><th>应收余额</th><th>出库总额</th><th>退货总额</th><th>操作</th></tr></thead>
 <tbody>
 <?php if ($summaries): foreach ($summaries as $row):
-    $balance = $row['order_total'] + floatval($row['initial_balance'] ?? 0) - $row['received_total'];
+    // 与统一口径一致：已确认退货同样冲减对账余额
+    $balance = $row['balance'];
     $outstockTotal = $outstockData[$row['id']] ?? 0;
     $returnTotal = $returnData[$row['id']] ?? 0;
-    $hasData = $row['order_total']>0 || $outstockTotal>0 || $returnTotal>0 || floatval($row['initial_balance']??0)>0;
+    $hasData = $row['order_total']>0 || $outstockTotal>0 || $returnTotal>0 || floatval($row['initial']??0)>0;
     if (!$hasData) continue;
 ?>
 <tr>
-    <td><strong><?=htmlspecialchars($row['customer_name'])?></strong></td>
+    <td><strong><?=htmlspecialchars($row['name'])?></strong></td>
     <td><?=htmlspecialchars($row['phone']?:'-')?></td>
     <td>¥<?=format_money($row['order_total'])?></td>
-    <td style="color:var(--success)">¥<?=format_money($row['received_total'])?></td>
+    <td style="color:var(--success)">¥<?=format_money($row['received'])?></td>
     <td style="color:<?=$balance>0?'var(--danger)':'var(--success)'?>"><strong>¥<?=format_money($balance)?></strong></td>
     <td>¥<?=format_money($outstockTotal)?></td>
     <td style="color:var(--danger)">¥<?=format_money($returnTotal)?></td>

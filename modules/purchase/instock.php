@@ -25,7 +25,7 @@ $fromOrder = null; $fromItems = [];
 if (isset($_GET['from_order']) && intval($_GET['from_order']) > 0) {
     $oid = intval($_GET['from_order']);
     // 检查是否已经入库过
-    $existingInstock = $pdo->prepare("SELECT id FROM purchase_instocks WHERE order_id=? LIMIT 1");
+    $existingInstock = $pdo->prepare("SELECT id FROM purchase_instocks WHERE order_id=? AND status='confirmed' LIMIT 1");
     $existingInstock->execute([$oid]);
     $existingInstock = $existingInstock->fetch();
     if ($existingInstock) {
@@ -64,22 +64,41 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'save') 
         }
         if (empty($itemData)) { $error='至少添加一个商品'; $pdo->rollBack(); }
         else {
+            $orderId = 0;
             if ($id > 0) {
                 $billNo = $_POST['bill_no'];
+                // 编辑已确认入库单：先按旧明细冲回库存，避免重复累加
+                $oldStmt = $pdo->prepare("SELECT * FROM purchase_instocks WHERE id=?");
+                $oldStmt->execute([$id]);
+                $oldBill = $oldStmt->fetch();
+                if ($oldBill) {
+                    $orderId = intval($oldBill['order_id']);
+                    if ($oldBill['status'] === 'confirmed') {
+                        $oldItemsStmt = $pdo->prepare("SELECT product_id, quantity FROM purchase_instock_items WHERE instock_id=?");
+                        $oldItemsStmt->execute([$id]);
+                        foreach ($oldItemsStmt->fetchAll() as $oi) {
+                            update_inventory($oi['product_id'], $oldBill['warehouse_id'], -floatval($oi['quantity']), 'out', $oldBill['bill_no'], 'purchase_instock_edit', get_user_id(), '编辑入库单冲回旧库存');
+                        }
+                    }
+                }
                 $pdo->prepare("UPDATE purchase_instocks SET supplier_id=?,warehouse_id=?,total_amount=?,instock_date=?,employee_id=?,remark=? WHERE id=?")->execute([$supplierId,$warehouseId,$totalAmount,$instockDate,$employeeId,$remark,$id]);
                 $pdo->prepare("DELETE FROM purchase_instock_items WHERE instock_id=?")->execute([$id]);
             } else {
                 $billNo = generate_bill_no('RK');
-                $pdo->prepare("INSERT INTO purchase_instocks (bill_no,order_id,supplier_id,warehouse_id,total_amount,instock_date,employee_id,remark,user_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)")->execute([$billNo,intval($_POST['order_id']??0),$supplierId,$warehouseId,$totalAmount,$instockDate,$employeeId,$remark,get_user_id(),date('Y-m-d H:i:s')]);
+                $orderId = intval($_POST['order_id']??0);
+                $pdo->prepare("INSERT INTO purchase_instocks (bill_no,order_id,supplier_id,warehouse_id,total_amount,instock_date,employee_id,remark,user_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)")->execute([$billNo,$orderId,$supplierId,$warehouseId,$totalAmount,$instockDate,$employeeId,$remark,get_user_id(),date('Y-m-d H:i:s')]);
                 $id = $pdo->lastInsertId();
             }
             $insStmt = $pdo->prepare("INSERT INTO purchase_instock_items (instock_id,product_id,quantity,price,amount) VALUES (?,?,?,?,?)");
             foreach ($itemData as $it) {
                 $insStmt->execute([$id,$it['pid'],$it['qty'],$it['price'],$it['amt']]);
-                if ($id > 0) update_inventory($it['pid'], $warehouseId, $it['qty'], 'in', $billNo, 'purchase_instock', get_user_id());
+                update_inventory($it['pid'], $warehouseId, $it['qty'], 'in', $billNo, 'purchase_instock', get_user_id());
+                update_avg_cost($it['pid'], $warehouseId, $it['qty'], $it['price']);
             }
-            // 确认入库更新库存
+            // 确认入库
             $pdo->prepare("UPDATE purchase_instocks SET status='confirmed' WHERE id=?")->execute([$id]);
+            // 同步关联采购订单状态（已入库 / 部分入库 / 回退已确认）
+            if ($orderId > 0) { sync_purchase_order_status($orderId); }
             add_log(get_user_id(), 'create', 'purchase_instock', "采购入库: $billNo");
             $pdo->commit();
             redirect('instock.php');
@@ -107,6 +126,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'undo') 
             }
             $pdo->prepare("UPDATE purchase_instocks SET status='draft' WHERE id=?")->execute([$iid]);
             add_log(get_user_id(), 'undo', 'purchase_instock', "撤销入库: {$instock['bill_no']}，库存已扣回");
+            // 撤销后回退关联订单状态（已确认 / 部分入库）
+            if (intval($instock['order_id']) > 0) { sync_purchase_order_status(intval($instock['order_id'])); }
             $pdo->commit();
         } catch (Exception $e) { $pdo->rollBack(); error_log('Instock undo error: '.$e->getMessage()); $error = '撤销失败，请稍后重试'; }
     }
@@ -129,13 +150,45 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'confirm
             $items = $stmt->fetchAll();
             foreach ($items as $item) {
                 update_inventory($item['product_id'], $instock['warehouse_id'], $item['quantity'], 'in', $instock['bill_no'], 'purchase_instock', get_user_id());
+                update_avg_cost($item['product_id'], $instock['warehouse_id'], $item['quantity'], $item['price']);
             }
             $pdo->prepare("UPDATE purchase_instocks SET status='confirmed' WHERE id=?")->execute([$iid]);
             add_log(get_user_id(), 'confirm', 'purchase_instock', "确认入库: {$instock['bill_no']}");
+            // 确认后同步关联订单状态（已入库 / 部分入库）
+            if (intval($instock['order_id']) > 0) { sync_purchase_order_status(intval($instock['order_id'])); }
             $pdo->commit();
         } catch (Exception $e) { $pdo->rollBack(); error_log('Instock confirm error: '.$e->getMessage()); $error = '确认失败，请稍后重试'; }
     }
     redirect('instock.php');
+}
+
+// 删除入库单（仅草稿可删；已确认的需先撤销，撤销会扣回库存）
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'delete') {
+    csrf_verify();
+    $iid = intval($_POST['id']??0);
+    $stmt = $pdo->prepare("SELECT * FROM purchase_instocks WHERE id=?");
+    $stmt->execute([$iid]);
+    $instock = $stmt->fetch();
+    if (!$instock) {
+        $error = '入库单不存在';
+    } elseif ($instock['status'] !== 'draft') {
+        $error = '仅草稿状态的入库单可删除，请先撤销该入库单';
+    } else {
+        $pdo->beginTransaction();
+        try {
+            $pdo->prepare("DELETE FROM purchase_instock_items WHERE instock_id=?")->execute([$iid]);
+            $pdo->prepare("DELETE FROM purchase_instocks WHERE id=?")->execute([$iid]);
+            // 删除后回退关联订单状态，订单恢复为可入库
+            if (intval($instock['order_id']) > 0) { sync_purchase_order_status(intval($instock['order_id'])); }
+            add_log(get_user_id(), 'delete', 'purchase_instock', "删除采购入库单: {$instock['bill_no']}");
+            $pdo->commit();
+        } catch (Exception $e) {
+            $pdo->rollBack();
+            error_log('Instock delete error: '.$e->getMessage());
+            $error = '删除失败，请稍后重试';
+        }
+    }
+    if (!isset($error)) { redirect('instock.php'); }
 }
 
 ?>
@@ -169,6 +222,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'confirm
         <div class="table-actions">
             <?php if($item['status']=='draft'): ?>
             <form method="post" style="display:inline"><?= csrf_field() ?><input type="hidden" name="action" value="confirm"><input type="hidden" name="id" value="<?=$item['id']?>"><button class="btn btn-sm btn-success">确认入库</button></form>
+            <form method="post" style="display:inline" onsubmit="return confirm('⚠️ 确定删除此入库单吗？\n\n删除后不可恢复，关联订单将恢复为可入库状态。\n\n单号：<?=$item['bill_no']?>')">
+                <?= csrf_field() ?>
+                <input type="hidden" name="action" value="delete"><input type="hidden" name="id" value="<?=$item['id']?>">
+                <button class="btn btn-sm btn-danger" title="删除入库单"><i class="fa-solid fa-trash"></i></button>
+            </form>
             <?php endif; ?>
             <a href="instock_view.php?id=<?=$item['id']?>" class="btn btn-sm btn-outline"><i class="fa-solid fa-eye"></i></a>
             <?php if ($item['status']=='confirmed' && check_permission('purchase_instock')): ?>
@@ -195,7 +253,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'confirm
 <form method="post" style="display:flex;flex-direction:column;flex:1;min-height:0;"><?= csrf_field() ?><input type="hidden" name="action" value="save"><input type="hidden" name="order_id" id="iform_order_id" value="<?=$fromOrder['id']??0?>">
 <div class="modal-body">
     <div class="form-row">
-        <div class="form-group"><label class="form-label">供应商 <span class="required">*</span></label><select name="supplier_id" class="form-control" required><option value="">选择供应商</option><?php foreach($suppliers as $k=>$v): ?><option value="<?=$k?>"><?=$v?></option><?php endforeach; ?></select></div>
+        <div class="form-group"><label class="form-label">供应商 <span class="required">*</span></label><select name="supplier_id" class="form-control searchable" data-ajax="/api/search_partners.php?type=supplier" required><option value="">选择供应商</option><?php foreach($suppliers as $k=>$v): ?><option value="<?=$k?>"><?=$v?></option><?php endforeach; ?></select></div>
         <div class="form-group"><label class="form-label">仓库 <span class="required">*</span></label><select name="warehouse_id" class="form-control" required><option value="">选择仓库</option><?php foreach($warehouses as $k=>$v): ?><option value="<?=$k?>"><?=$v?></option><?php endforeach; ?></select></div>
         <div class="form-group"><label class="form-label">入库日期</label><input type="date" name="instock_date" class="form-control" value="<?=date('Y-m-d')?>"></div>
     </div>
@@ -232,7 +290,9 @@ function buildInstockRow(pid,qty,price,amt,canDelete){
 }
 
 function openInstockModal(){
-    document.querySelector('#instockModal select[name="supplier_id"]').selectedIndex=0;
+    var supSel0=document.querySelector('#instockModal select[name="supplier_id"]');
+    supSel0.selectedIndex=0;
+    supSel0.dispatchEvent(new Event('change')); // 同步可搜索下拉的显示
     document.querySelector('#instockModal select[name="warehouse_id"]').selectedIndex=0;
     document.getElementById('iform_order_id').value='0';
     var items=document.getElementById('instockItems');
@@ -243,6 +303,7 @@ function openInstockModal(){
     for(var i=0;i<supSel.options.length;i++){
         if(supSel.options[i].value=='<?=$fromOrder['supplier_id']?>'){supSel.selectedIndex=i;break;}
     }
+    supSel.dispatchEvent(new Event('change')); // 同步可搜索下拉的显示
     var whSel=document.querySelector('#instockModal select[name="warehouse_id"]');
     for(var i=0;i<whSel.options.length;i++){
         if(whSel.options[i].value=='<?=$fromOrder['warehouse_id']?>'){whSel.selectedIndex=i;break;}

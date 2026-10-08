@@ -1,12 +1,15 @@
 <?php
 require_once __DIR__ . '/../../includes/header.php';
-require_permission('master_data');
+// 追踪码查询：查看级权限即可
+require_tracking_perm(false);
 ?>
 <div class="page-header">
     <h1 class="page-title"><i class="fa-solid fa-search"></i> 追踪码查询</h1>
     <div style="display:flex;gap:8px;">
         <a href="list.php" class="btn btn-outline"><i class="fa-solid fa-list"></i> 追踪码管理</a>
+        <?php if (check_tracking_perm(true)): ?>
         <a href="create.php" class="btn btn-primary"><i class="fa-solid fa-plus"></i> 生成追踪码</a>
+        <?php endif; ?>
     </div>
 </div>
 

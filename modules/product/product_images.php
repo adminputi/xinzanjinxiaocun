@@ -10,9 +10,14 @@ $pdo = getDB();
 // 确保图片表存在
 try { $pdo->exec("CREATE TABLE IF NOT EXISTS `product_images` (`id` INT AUTO_INCREMENT PRIMARY KEY, `product_id` INT NOT NULL, `image_url` VARCHAR(500) NOT NULL, `sort_order` INT DEFAULT 0, `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP, INDEX `idx_product` (`product_id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"); } catch (Exception $e) {}
 
-// 上传图片
+// 上传图片（属于商品编辑范畴，需要 product_edit 权限，默认只有管理员拥有）
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['image']) && isset($_POST['product_id'])) {
     upload_verify();
+    if (!check_permission('product_edit')) {
+        header('Content-Type: application/json');
+        echo json_encode(['success' => false, 'message' => '无权限：只有管理员或被授权的角色才能修改商品图片', 'upload_token' => upload_token()], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
     $productId = intval($_POST['product_id']);
     $uploadDir = __DIR__ . '/../../uploads/products/' . $productId . '/';
     if (!is_dir($uploadDir)) mkdir($uploadDir, 0755, true);
@@ -30,11 +35,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['image']) && isset($_
             if (!in_array($ext, ['jpg', 'jpeg', 'png', 'gif', 'webp'])) continue;
 
             // 验证文件 MIME 类型和 Magic Bytes，防止伪装文件上传
-            $finfo = finfo_open(FILEINFO_MIME_TYPE);
-            $mime = finfo_file($finfo, $tmpName);
-            finfo_close($finfo);
+            $mime = detect_mime_type($tmpName);
             $allowedMimes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
-            if (!in_array($mime, $allowedMimes)) continue;
+            // 无 fileinfo 扩展时会拿不到具体类型，此时交给下面的 Magic Bytes 校验
+            if ($mime !== 'application/octet-stream' && !in_array($mime, $allowedMimes)) continue;
 
             // 二次确认：验证 Magic Bytes
             $header = file_get_contents($tmpName, false, null, 0, 8);
@@ -84,6 +88,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['image']) && isset($_
 // 删除图片
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'delete_image') {
     upload_verify();
+    if (!check_permission('product_edit')) {
+        echo json_encode(['success' => false, 'message' => '无权限：只有管理员或被授权的角色才能删除商品图片', 'upload_token' => upload_token()], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
     $imgId = intval($_POST['img_id'] ?? 0);
     $stmt = $pdo->prepare("SELECT * FROM product_images WHERE id=?");
     $stmt->execute([$imgId]);

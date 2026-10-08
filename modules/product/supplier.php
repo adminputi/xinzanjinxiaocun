@@ -25,6 +25,11 @@ $nextSupCode = 'GYS' . str_pad($nextSupNum, 4, '0', STR_PAD_LEFT);
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_verify();
     $action = $_POST['action'] ?? '';
+    // 新增/修改/删除供应商需要 supplier_edit 权限（默认只有管理员拥有），后端必须校验防止绕过按钮直接提交
+    if (in_array($action, ['save', 'delete']) && !check_permission('supplier_edit')) {
+        flash_set('无权限：只有管理员或被授权的角色才能新增/修改/删除供应商', 'danger');
+        redirect("supplier.php?page=$page&search=" . urlencode($search));
+    }
     if ($action === 'save') {
         $id = intval($_POST['id'] ?? 0);
         $data = [$_POST['code']??'', $_POST['name']??'', $_POST['contact']??'', $_POST['phone']??'', $_POST['email']??'', $_POST['address']??'', $_POST['bank_name']??'', $_POST['bank_account']??'', $_POST['tax_no']??'', $_POST['remark']??''];
@@ -36,7 +41,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $pdo->prepare("INSERT INTO suppliers (code,name,contact,phone,email,address,bank_name,bank_account,tax_no,remark,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)")->execute(array_merge($data, [date('Y-m-d H:i:s')]));
             }
         }
-    } elseif ($action === 'delete') { $pdo->prepare("DELETE FROM suppliers WHERE id=?")->execute([intval($_POST['id']??0)]); }
+    } elseif ($action === 'delete') {
+        $id = intval($_POST['id'] ?? 0);
+        // 供应商被单据引用即不可物理删除（删除会让该供应商的应付从统计中蒸发）
+        $chk = check_refs($id, [
+            '采购订单'   => "SELECT COUNT(*) FROM purchase_orders WHERE supplier_id=?",
+            '采购入库单' => "SELECT COUNT(*) FROM purchase_instocks WHERE supplier_id=?",
+            '采购退货单' => "SELECT COUNT(*) FROM purchase_returns WHERE supplier_id=?",
+            '付款单'     => "SELECT COUNT(*) FROM payments WHERE supplier_id=?",
+        ]);
+        if (!$chk['ok']) {
+            flash_set($chk['msg']);
+        } else {
+            $st = $pdo->prepare("SELECT name FROM suppliers WHERE id=?");
+            $st->execute([$id]);
+            $sname = $st->fetchColumn();
+            $pdo->prepare("DELETE FROM suppliers WHERE id=?")->execute([$id]);
+            add_log(get_user_id(), 'delete', 'supplier', "删除供应商: {$sname}(ID:$id)");
+            flash_set('供应商已删除：' . $sname, 'success');
+        }
+    }
     redirect("supplier.php?page=$page&search=".urlencode($search));
 }
 ?>
@@ -44,12 +68,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <div class="page-header">
     <h1 class="page-title"><i class="fa-solid fa-truck"></i> 供应商管理</h1>
     <div class="page-actions">
+        <?php if (check_permission('supplier_edit')): ?>
         <a href="import.php?type=supplier" class="btn btn-outline"><i class="fa-solid fa-upload"></i> 导入</a>
-        <button class="btn btn-outline" onclick="exportSuppliers()"><i class="fa-solid fa-download"></i> 导出</button>
         <button class="btn btn-primary" onclick="openModal('supModal')"><i class="fa-solid fa-plus"></i> 新增供应商</button>
+        <?php endif; ?>
+        <button class="btn btn-outline" onclick="exportSuppliers()"><i class="fa-solid fa-download"></i> 导出</button>
     </div>
 </div>
 <?php if (isset($error)): ?><div class="alert alert-danger"><?= $error ?></div><?php endif; ?>
+<?php flash_show(); ?>
 
 <form class="filter-bar" method="get">
     <div class="search-box"><i class="fa-solid fa-search"></i><input type="text" name="search" class="form-control" placeholder="搜索供应商名称/电话/联系人..." value="<?= htmlspecialchars($search) ?>"></div>
@@ -68,9 +95,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <td><?= htmlspecialchars($item['contact']?:'-') ?></td><td><?= htmlspecialchars($item['phone']?:'-') ?></td>
     <td><?= htmlspecialchars(mb_substr($item['address']?:'-',0,20)) ?></td>
     <td>
-        <button class="btn btn-sm btn-outline" onclick="editSup(<?= htmlspecialchars(json_encode($item, JSON_UNESCAPED_UNICODE)) ?>)"><i class="fa-solid fa-pen"></i></button>
         <a href="supplier_detail.php?id=<?=$item['id']?>" class="btn btn-sm btn-outline" title="详情"><i class="fa-solid fa-eye"></i></a>
+        <?php if (check_permission('supplier_edit')): ?>
+        <button class="btn btn-sm btn-outline" onclick="editSup(<?= htmlspecialchars(json_encode($item, JSON_UNESCAPED_UNICODE)) ?>)"><i class="fa-solid fa-pen"></i></button>
         <form method="post" style="display:inline" onsubmit="return confirm('确定删除？')"><?= csrf_field() ?><input type="hidden" name="action" value="delete"><input type="hidden" name="id" value="<?= $item['id'] ?>"><button class="btn btn-sm btn-outline"><i class="fa-solid fa-trash" style="color:var(--danger)"></i></button></form>
+        <?php endif; ?>
     </td>
 </tr>
 <?php endforeach; else: ?>

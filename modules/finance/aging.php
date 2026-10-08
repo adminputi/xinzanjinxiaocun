@@ -7,21 +7,11 @@ $pdo = getDB();
 
 $customerId = intval($_GET['customer_id'] ?? 0);
 
-$sql = "SELECT c.id, c.name as customer_name, c.phone, c.initial_balance,
-    SUM(CASE WHEN so.order_date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) THEN so.total_amount - so.received_amount ELSE 0 END) as within30,
-    SUM(CASE WHEN so.order_date >= DATE_SUB(CURDATE(), INTERVAL 60 DAY) AND so.order_date < DATE_SUB(CURDATE(), INTERVAL 30 DAY) THEN so.total_amount - so.received_amount ELSE 0 END) as within60,
-    SUM(CASE WHEN so.order_date >= DATE_SUB(CURDATE(), INTERVAL 90 DAY) AND so.order_date < DATE_SUB(CURDATE(), INTERVAL 60 DAY) THEN so.total_amount - so.received_amount ELSE 0 END) as within90,
-    SUM(CASE WHEN so.order_date < DATE_SUB(CURDATE(), INTERVAL 90 DAY) THEN so.total_amount - so.received_amount ELSE 0 END) + c.initial_balance as over90,
-    SUM(so.total_amount - so.received_amount) + c.initial_balance as total_balance
-FROM customers c
-LEFT JOIN sales_orders so ON c.id=so.customer_id AND so.status NOT IN('draft','cancelled')
-WHERE c.status=1";
-$params = [];
-if ($customerId) { $sql .= " AND c.id=?"; $params[]=$customerId; }
-$sql .= " GROUP BY c.id HAVING total_balance > 0 ORDER BY total_balance DESC";
-
-$stmt = $pdo->prepare($sql); $stmt->execute($params);
-$agings = $stmt->fetchAll();
+// 账龄统一由 get_ar_by_customer 计算：应收余额 = 订单总额 - 已收 + 期初 - 已确认退货
+// 期初应收归入 90 天以上，与首页看板、应收应付、客户对账完全同一口径
+$agings = array_values(array_filter(get_ar_by_customer($customerId), function ($r) {
+    return $r['balance'] > 0.005;
+}));
 
 $totalAging = ['within30'=>0,'within60'=>0,'within90'=>0,'over90'=>0,'total'=>0];
 foreach ($agings as $a) {
@@ -29,7 +19,7 @@ foreach ($agings as $a) {
     $totalAging['within60'] += $a['within60'];
     $totalAging['within90'] += $a['within90'];
     $totalAging['over90'] += $a['over90'];
-    $totalAging['total'] += $a['total_balance'];
+    $totalAging['total'] += $a['balance'];
 }
 
 $customers = get_options('customers','id','name','status=1');
@@ -40,7 +30,7 @@ $customers = get_options('customers','id','name','status=1');
 </div>
 
 <form class="filter-bar" method="get">
-    <select name="customer_id" class="form-control" style="min-width:180px;"><option value="0">全部客户</option><?php foreach($customers as $k=>$v): ?><option value="<?=$k?>" <?=$customerId==$k?'selected':''?>><?=$v?></option><?php endforeach; ?></select>
+    <select name="customer_id" class="form-control searchable" style="min-width:180px;"><option value="0">全部客户</option><?php foreach($customers as $k=>$v): ?><option value="<?=$k?>" <?=$customerId==$k?'selected':''?>><?=$v?></option><?php endforeach; ?></select>
     <button type="submit" class="btn btn-primary btn-sm">查询</button>
 </form>
 
@@ -57,13 +47,13 @@ $customers = get_options('customers','id','name','status=1');
 <tbody>
 <?php if ($agings): foreach ($agings as $a): ?>
 <tr>
-    <td><strong><?=htmlspecialchars($a['customer_name'])?></strong></td>
+    <td><strong><?=htmlspecialchars($a['name'])?></strong></td>
     <td><?=htmlspecialchars($a['phone']?:'-')?></td>
     <td>¥<?=format_money($a['within30'])?></td>
     <td>¥<?=format_money($a['within60'])?></td>
     <td>¥<?=format_money($a['within90'])?></td>
     <td style="color:<?=$a['over90']>0?'var(--danger)':''?>"><strong>¥<?=format_money($a['over90'])?></strong></td>
-    <td style="font-weight:bold;">¥<?=format_money($a['total_balance'])?></td>
+    <td style="font-weight:bold;">¥<?=format_money($a['balance'])?></td>
 </tr>
 <?php endforeach; else: ?>
 <tr><td colspan="7"><div class="empty-state"><i class="fa-solid fa-hourglass-half"></i><p>暂无欠款记录</p></div></td></tr>

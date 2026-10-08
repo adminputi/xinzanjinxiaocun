@@ -189,7 +189,7 @@ if ($editId > 0) {
 <form method="post"><?= csrf_field() ?><input type="hidden" name="action" id="sretAction" value="save"><input type="hidden" name="id" id="sretEditId" value="0">
 <div class="modal-body">
     <div class="form-row">
-        <div class="form-group"><label class="form-label">客户 <span class="required">*</span></label><select name="customer_id" id="sretCustomerId" class="form-control" required><option value="">选择客户</option><?php foreach($customers as $k=>$v): ?><option value="<?=$k?>"><?=$v?></option><?php endforeach; ?></select></div>
+        <div class="form-group"><label class="form-label">客户 <span class="required">*</span></label><select name="customer_id" id="sretCustomerId" class="form-control searchable" data-ajax="/api/search_partners.php?type=customer" required><option value="">选择客户</option><?php foreach($customers as $k=>$v): ?><option value="<?=$k?>"><?=$v?></option><?php endforeach; ?></select></div>
         <div class="form-group"><label class="form-label">仓库 <span class="required">*</span></label><select name="warehouse_id" id="sretWarehouseId" class="form-control" required><option value="">选择仓库</option><?php foreach($warehouses as $k=>$v): ?><option value="<?=$k?>"><?=$v?></option><?php endforeach; ?></select></div>
         <div class="form-group"><label class="form-label">退货日期</label><input type="date" name="return_date" id="sretReturnDate" class="form-control" value="<?=date('Y-m-d')?>"></div>
     </div>

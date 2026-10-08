@@ -97,22 +97,87 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'undo_ou
     redirect("order.php?page=$page");
 }
 
-// 删除订单（仅admin）
+/**
+ * 删除销售订单后，把上游逐级回退，否则整条链会卡死：
+ * 合同停在执行中/已完成 → 编辑不了；报价单停在「已转合同」→ 也编辑不了。
+ * 只在「该合同已无任何有效订单」时才回退，所以一份合同分多次下单、只删其中一单不会误退。
+ * 必须在调用方的事务内执行。
+ */
+function rollback_upstream_on_order_delete($pdo, $order) {
+    $cid = intval($order['contract_id'] ?? 0);
+    if (!$cid) return;
+
+    $st = $pdo->prepare("SELECT * FROM sales_contracts WHERE id=?");
+    $st->execute([$cid]);
+    $contract = $st->fetch();
+    if (!$contract) return;
+    // 已终止的合同不复活：终止是明确的业务动作，不该被删订单悄悄撤销
+    if (!in_array($contract['status'], ['executing', 'completed'], true)) return;
+
+    // 本单已删，这里数的是剩下的有效订单
+    $stc = $pdo->prepare("SELECT COUNT(*) FROM sales_orders WHERE contract_id=? AND status<>'cancelled'");
+    $stc->execute([$cid]);
+    if (intval($stc->fetchColumn()) > 0) {
+        // 还有别的订单在履约，合同维持执行中
+        $pdo->prepare("UPDATE sales_contracts SET status='executing' WHERE id=?")->execute([$cid]);
+        return;
+    }
+
+    // 回退一级：回到「转销售订单的上一步」——已生效，可再次编辑、可再次转单
+    $pdo->prepare("UPDATE sales_contracts SET status='confirmed' WHERE id=?")->execute([$cid]);
+
+    // 再向上回退一级：报价单恢复可编辑（合同明细取自报价单，改明细要能从这里改）。
+    // 保留 contract_id 不清空——关联合同还在，且「转合同」靠它避免重复生成第二份合同
+    if (!empty($contract['quote_id'])) {
+        $pdo->prepare("UPDATE sales_quotes SET status='draft' WHERE id=? AND contract_id=? AND status='contracted'")
+            ->execute([$contract['quote_id'], $cid]);
+    }
+
+    add_log(get_user_id(), 'update', 'sales_contract',
+        "删除订单后回退上游: 合同 {$contract['contract_no']} → 已生效（可再次编辑/转单），来源报价单恢复可编辑");
+}
+
+// 删除订单（仅admin；无下游单据、无已收金额才可删，已生效的走「取消订单」留痕）
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'delete') {
     csrf_verify();
     if (!$isAdmin) die('无权限');
     $oid = intval($_POST['id']??0);
-    $pdo->beginTransaction();
-    try {
-        $pdo->prepare("DELETE FROM sales_order_items WHERE order_id=?")->execute([$oid]);
-        $pdo->prepare("DELETE FROM sales_orders WHERE id=?")->execute([$oid]);
-        add_log(get_user_id(), 'delete', 'sales_order', "删除订单: ID=$oid");
-        $pdo->commit();
-    } catch (Exception $e) { $pdo->rollBack(); }
+    $st = $pdo->prepare("SELECT * FROM sales_orders WHERE id=?");
+    $st->execute([$oid]);
+    $order = $st->fetch();
+    if (!$order) {
+        flash_set('订单不存在');
+    } else {
+        $chk = check_refs($oid, [
+            '销售出库单' => "SELECT COUNT(*) FROM sales_outstocks WHERE order_id=?",
+            '销售报价'   => "SELECT COUNT(*) FROM sales_quotes WHERE order_id=?",
+            '收款单'     => "SELECT COUNT(*) FROM receipts WHERE order_id=?",
+        ]);
+        if (!$chk['ok']) {
+            flash_set($chk['msg'] . ' 如需终止该订单，请改用「取消订单」。');
+        } elseif (floatval($order['received_amount'] ?? 0) > 0) {
+            flash_set('该订单已收款 ¥' . format_money($order['received_amount']) . '，不允许删除（删除会让已收金额凭空消失）。');
+        } else {
+            $pdo->beginTransaction();
+            try {
+                $pdo->prepare("DELETE FROM sales_order_items WHERE order_id=?")->execute([$oid]);
+                $pdo->prepare("DELETE FROM sales_orders WHERE id=?")->execute([$oid]);
+                // 同步回退上游（合同 → 报价单），否则合同会一直卡在执行中改不了
+                rollback_upstream_on_order_delete($pdo, $order);
+                add_log(get_user_id(), 'delete', 'sales_order', "删除订单: {$order['bill_no']}(ID:$oid)");
+                $pdo->commit();
+                flash_set('订单已删除：' . $order['bill_no'], 'success');
+            } catch (Exception $e) {
+                $pdo->rollBack();
+                flash_set('删除失败：' . $e->getMessage());
+            }
+        }
+    }
     redirect("order.php?page=$page");
 }
 ?>
 
+<?php flash_show(); ?>
 <div class="page-header">
     <h1 class="page-title"><i class="fa-solid fa-file-invoice-dollar"></i> 销售订单</h1>
     <a href="order_form.php" class="btn btn-primary"><i class="fa-solid fa-plus"></i> 新增销售订单</a>

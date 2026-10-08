@@ -220,7 +220,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'undo') 
         <div class="form-group">
             <label class="form-label">客户 <span class="required">*</span></label>
             <div style="display:flex;gap:6px;">
-                <select name="customer_id" id="ocust" class="form-control" onchange="onCustChange()" required style="flex:1;">
+                <select name="customer_id" id="ocust" class="form-control searchable" data-ajax="/api/search_partners.php?type=customer" onchange="onCustChange()" required style="flex:1;">
                     <option value="">选择客户</option>
                     <?php foreach($custList as $c): ?>
                     <option value="<?=$c['id']?>" data-phone="<?=htmlspecialchars($c['phone'])?>" data-address="<?=htmlspecialchars($c['address'])?>" data-contact="<?=htmlspecialchars($c['contact'])?>"><?=htmlspecialchars($c['name'])?></option>

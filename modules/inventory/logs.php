@@ -9,14 +9,11 @@ $dateTo = $_GET['date_to'] ?? date('Y-m-d');
 $type = $_GET['type'] ?? '';
 $search = $_GET['search'] ?? '';
 
-// 删除记录
+// 库存变动记录是库存的唯一可追溯凭据，禁止删除（删除会导致库存无法重算、账实不符）
+// 确需纠正的，应通过原单据「撤销」或新增调整单处理
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'delete') {
     csrf_verify();
-    $delId = intval($_POST['id'] ?? 0);
-    if ($delId > 0) {
-        $pdo->prepare("DELETE FROM inventory_logs WHERE id=?")->execute([$delId]);
-        add_log(get_user_id(), 'delete', 'inventory_log', "删除库存变动记录ID: $delId");
-    }
+    flash_set('库存变动记录不允许删除：它是库存的唯一可追溯凭据，删除后将无法重算库存。如需纠正，请到原单据执行「撤销」或新增调整单。');
     redirect("logs.php?page=$page&date_from=$dateFrom&date_to=$dateTo&type=$type&search=".urlencode($search));
 }
 
@@ -36,6 +33,7 @@ $typeLabels = ['in'=>'入库','out'=>'出库','transfer_in'=>'调拨入','transf
 $typeBadges = ['in'=>'success','out'=>'danger','transfer_in'=>'info','transfer_out'=>'warning','check'=>'primary','loss'=>'orange'];
 ?>
 
+<?php flash_show(); ?>
 <div class="page-header">
     <h1 class="page-title"><i class="fa-solid fa-clock-rotate-left"></i> 库存变动记录</h1>
     <button class="btn btn-outline" onclick="exportLogs()"><i class="fa-solid fa-download"></i> 导出</button>
@@ -65,14 +63,7 @@ $typeBadges = ['in'=>'success','out'=>'danger','transfer_in'=>'info','transfer_o
     <td><?=$item['bill_no']?></td>
     <td><?=htmlspecialchars($item['user_name']?:'-')?></td>
     <td><?=htmlspecialchars(mb_substr($item['remark']?:'','0','20'))?></td>
-    <td>
-        <form method="post" style="display:inline" onsubmit="return confirm('确定删除该库存变动记录？此操作不可恢复')">
-            <?= csrf_field() ?>
-            <input type="hidden" name="action" value="delete">
-            <input type="hidden" name="id" value="<?=$item['id']?>">
-            <button class="btn btn-sm btn-outline" title="删除"><i class="fa-solid fa-trash" style="color:var(--danger)"></i></button>
-        </form>
-    </td>
+    <td><span style="color:var(--gray-500);font-size:12px;" title="库存流水为库存唯一凭据，需纠正请撤销原单据">不可删除</span></td>
 </tr>
 <?php endforeach; else: ?>
 <tr><td colspan="10"><div class="empty-state"><i class="fa-solid fa-clock-rotate-left"></i><p>暂无变动记录</p></div></td></tr>

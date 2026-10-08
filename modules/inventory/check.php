@@ -42,14 +42,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'confirm
     $st->execute([$checkId]);
     $checkOrder = $st->fetch();
 
+    // 状态守卫：已确认的盘点单不可重复确认，否则差异会被重复叠加进库存
+    if (!$checkOrder) {
+        flash_set('盘点单不存在');
+        redirect('check.php');
+    }
+    if ($checkOrder['status'] === 'confirmed') {
+        flash_set("盘点单 {$checkOrder['bill_no']} 已确认，不能重复确认（重复确认会把差异再次计入库存）。");
+        redirect('check.php');
+    }
+    if ($checkOrder['status'] === 'cancelled') {
+        flash_set("盘点单 {$checkOrder['bill_no']} 已作废，不能确认。");
+        redirect('check.php');
+    }
+
     $pdo->beginTransaction();
     try {
         $st = $pdo->prepare("SELECT * FROM check_items WHERE check_id=?");
         $st->execute([$checkId]);
         $items = $st->fetchAll();
+        // 确认时按当前实际库存重算账面数：建单到确认之间的出入库不能被旧差异覆盖
+        $bookStmt = $pdo->prepare("SELECT COALESCE(quantity,0) FROM inventory WHERE product_id=? AND warehouse_id=?");
+        $updItem  = $pdo->prepare("UPDATE check_items SET book_qty=?, diff_qty=? WHERE id=?");
         foreach ($items as $item) {
-            if ($item['diff_qty'] != 0) {
-                update_inventory($item['product_id'], $checkOrder['warehouse_id'], $item['diff_qty'], 'check', $checkOrder['bill_no'], 'check', get_user_id(), '盘点调整');
+            $bookStmt->execute([$item['product_id'], $checkOrder['warehouse_id']]);
+            $bookQty = floatval($bookStmt->fetchColumn());
+            $diffQty = floatval($item['actual_qty']) - $bookQty;
+            $updItem->execute([$bookQty, $diffQty, $item['id']]);
+            if (abs($diffQty) > 0.000001) {
+                update_inventory($item['product_id'], $checkOrder['warehouse_id'], $diffQty, 'check', $checkOrder['bill_no'], 'check', get_user_id(), '盘点调整');
             }
         }
         $pdo->prepare("UPDATE check_orders SET status='confirmed' WHERE id=?")->execute([$checkId]);
@@ -65,6 +86,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'confirm
     <button class="btn btn-primary" onclick="openModal('checkModal')"><i class="fa-solid fa-plus"></i> 新建盘点单</button>
 </div>
 <?php if (isset($error)): ?><div class="alert alert-danger"><?= $error ?></div><?php endif; ?>
+<?php flash_show(); ?>
 
 <div class="card"><div class="card-body" style="padding:0;"><div class="table-container">
 <table>

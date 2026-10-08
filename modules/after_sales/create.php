@@ -1,6 +1,7 @@
 <?php
 require_once __DIR__ . '/../../includes/header.php';
-require_permission('master_data');
+// 生成追踪码属于编辑操作，需要 tracking_edit（仅查看权限的角色不能生成）
+require_tracking_perm(true);
 $pdo = getDB();
 
 $statuses = $pdo->query("SELECT * FROM tracking_statuses WHERE status=1 ORDER BY sort_order ASC")->fetchAll();
@@ -94,6 +95,7 @@ var customFieldIdx = 0;
 var fieldMapping = [
     {key:'customer_name', label:'客户姓名', source:'customer_name'},
     {key:'customer_phone', label:'客户电话', source:'customer_phone'},
+    {key:'customer_address', label:'客户地址', source:'customer_address'},
     {key:'outstock_date', label:'出库日期', source:'outstock_date'},
     {key:'warehouse_name', label:'发货仓库', source:'warehouse_name'},
     {key:'receiver_name', label:'接货人', source:'receiver_name'},

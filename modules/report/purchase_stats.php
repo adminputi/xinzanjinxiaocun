@@ -29,7 +29,7 @@ $supplierOptions = get_options('suppliers','id','name','status=1');
     <input type="date" name="date_from" class="form-control" value="<?=$dateFrom?>" style="min-width:130px;">
     <span>至</span>
     <input type="date" name="date_to" class="form-control" value="<?=$dateTo?>" style="min-width:130px;">
-    <select name="supplier_id" class="form-control" style="min-width:150px;"><option value="0">全部供应商</option><?php foreach($supplierOptions as $k=>$v): ?><option value="<?=$k?>" <?=$supplierId==$k?'selected':''?>><?=$v?></option><?php endforeach; ?></select>
+    <select name="supplier_id" class="form-control searchable" style="min-width:150px;"><option value="0">全部供应商</option><?php foreach($supplierOptions as $k=>$v): ?><option value="<?=$k?>" <?=$supplierId==$k?'selected':''?>><?=$v?></option><?php endforeach; ?></select>
     <button type="submit" class="btn btn-primary btn-sm">查询</button>
 </form>
 

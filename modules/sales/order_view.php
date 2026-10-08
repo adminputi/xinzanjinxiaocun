@@ -6,12 +6,19 @@ $pdo = getDB();
 run_migrations();
 $id = intval($_GET['id'] ?? 0);
 
-$stmt = $pdo->prepare("SELECT o.*, c.name as customer_name, c.phone as customer_phone, c.address as customer_address, c.contact as customer_contact, w.name as warehouse_name, u.real_name as employee_name, u.phone as employee_phone FROM sales_orders o LEFT JOIN customers c ON o.customer_id=c.id LEFT JOIN warehouses w ON o.warehouse_id=w.id LEFT JOIN users u ON o.employee_id=u.id WHERE o.id=?");
+$stmt = $pdo->prepare("SELECT o.*, c.name as customer_name, c.owner_id as customer_owner_id, c.phone as customer_phone, c.address as customer_address, c.contact as customer_contact, w.name as warehouse_name, u.real_name as employee_name, u.phone as employee_phone FROM sales_orders o LEFT JOIN customers c ON o.customer_id=c.id LEFT JOIN warehouses w ON o.warehouse_id=w.id LEFT JOIN users u ON o.employee_id=u.id WHERE o.id=?");
 $stmt->execute([$id]);
 $order = $stmt->fetch();
 if (!$order) { die('订单不存在'); }
-// 非admin用户只能查看自己的记录
-if ($_SESSION['user_role'] !== 'admin' && ($order['user_id'] ?? 0) != get_user_id()) { die('无权查看此记录'); }
+// 非admin用户只能查看与自己相关的记录：本人创建，或该客户归属本人
+$isAdmin = ($_SESSION['user_role'] ?? '') === 'admin';
+if (!$isAdmin
+    && intval($order['user_id'] ?? 0) !== intval(get_user_id())
+    && intval($order['customer_owner_id'] ?? 0) !== intval(get_user_id())) {
+    die('无权查看此记录');
+}
+// 登记收款：管理员，或被授予 sales_receive 的角色
+$canReceive = $isAdmin || check_permission('sales_receive');
 
 // 查询追踪码及打印开关
 $printTracking = $pdo->query("SELECT setting_value FROM system_settings WHERE setting_key='print_tracking_code'")->fetchColumn();
@@ -47,26 +54,12 @@ if ($trackingCode) {
 $stmt2 = $pdo->prepare("SELECT i.*, p.name as product_name, p.sku, p.spec, p.image as product_image, p.description as product_description, u.name as unit_name FROM sales_order_items i JOIN products p ON i.product_id=p.id LEFT JOIN units u ON p.unit_id=u.id WHERE i.order_id=?");
 $stmt2->execute([$id]);
 $items = $stmt2->fetchAll();
-// 将商品图片转为 base64 嵌入（避免打印时路径失效）
-foreach ($items as &$it) {
-    $it['image_base64'] = '';
-    if (!empty($it['product_image'])) {
-        $imgPath = __DIR__ . '/../../' . $it['product_image'];
-        if (file_exists($imgPath)) {
-            $data = @file_get_contents($imgPath);
-            if ($data !== false) {
-                $ext = strtolower(pathinfo($imgPath, PATHINFO_EXTENSION));
-                $mime = in_array($ext, ['jpg','jpeg']) ? 'jpeg' : ($ext === 'svg' ? 'svg+xml' : $ext);
-                $it['image_base64'] = 'data:image/' . $mime . ';base64,' . base64_encode($data);
-            }
-        }
-    }
-}
-unset($it);
+// 商品图片【不在服务端转 base64】：图片多/大时会使页面 HTML 暴涨，导致详情页加载卡顿。
+// 首屏只输出图片路径，打印/导出时再由前端按需转成压缩后的 dataURL（见 assets/js/print-image.js）
 $statusLabels = ['draft'=>'可编辑','confirmed'=>'已锁定','shipped'=>'已出库'];
 
 // 确保打印模板表存在且模板已更新到最新版本
-try { $pdo->exec("CREATE TABLE IF NOT EXISTS `print_templates` (`id` INT AUTO_INCREMENT PRIMARY KEY, `name` VARCHAR(100) NOT NULL, `type` VARCHAR(30) NOT NULL DEFAULT 'sales_order', `content` TEXT, `is_default` TINYINT DEFAULT 0, `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"); } catch (Exception $e) {}
+ensure_print_templates_table($pdo);
 // 仅删除过时的默认模板（按名称精确匹配，不触碰用户自定义模板）
 $pdo->exec("DELETE FROM print_templates WHERE type='sales_order' AND name IN ('默认销售单（含单价金额）','默认销售单（不含单价金额）') AND (content NOT LIKE '%<thead>%' OR content NOT LIKE '%{tracking_no}%')");
 $existA = $pdo->query("SELECT COUNT(*) FROM print_templates WHERE type='sales_order' AND name='默认销售单（含单价金额）'")->fetchColumn();
@@ -119,8 +112,13 @@ if ($existQuote->fetchColumn() == 0) {
     . '<strong>备注：</strong><br>{remark}'
     . '</div>'
     . '</div>';
-    $pdo->prepare("INSERT INTO print_templates (name,type,content,is_default) VALUES (?,?,?,0)")
-        ->execute(['产品项目方案单（含图片+描述）', 'quote', $quoteTplContent]);
+    try {
+        $pdo->prepare("INSERT INTO print_templates (name,type,content,is_default) VALUES (?,?,?,0)")
+            ->execute(['产品项目方案单（含图片+描述）', 'quote', $quoteTplContent]);
+    } catch (Exception $e) {
+        // 模板初始化失败不应阻断详情页（打印模板可在「打印模板」页面另行维护）
+        error_log('print_templates quote init failed: ' . $e->getMessage());
+    }
 }
 
 // 获取所有打印模板
@@ -146,15 +144,18 @@ $companyPhone = $pdo->query("SELECT setting_value FROM system_settings WHERE set
 <div class="page-header">
     <h1 class="page-title"><i class="fa-solid fa-eye"></i> 销售订单详情</h1>
     <div class="page-actions">
+        <?php if ($canReceive && floatval($order['total_amount']) - floatval($order['received_amount'] ?? 0) > 0.005): ?>
+        <a class="btn btn-success" href="../finance/receive.php?order_id=<?=$order['id']?>&back=<?=urlencode('modules/sales/order_view.php?id='.$id)?>"><i class="fa-solid fa-money-bill-wave"></i> 登记收款</a>
+        <?php endif; ?>
         <div style="display:flex;align-items:center;gap:4px;">
             <select id="tplSelect" class="form-control" style="width:auto;display:inline-block;" onchange="selectTpl(this.value)">
                 <?php 
-                $typeLabels = ['sales_order'=>'销售单','sales_outstock'=>'销售出库单','purchase_order'=>'采购单','purchase_instock'=>'采购入库单'];
+                $typeLabels = ['sales_order'=>'销售单','sales_outstock'=>'销售出库单','purchase_order'=>'采购单','purchase_instock'=>'采购入库单','quote'=>'报价方案单','product_catalog'=>'产品目录'];
                 foreach ($templates as $tp): ?>
                 <option value="<?=$tp['id']?>" <?=($tpl && $tpl['id']==$tp['id'])?'selected':''?>><?=htmlspecialchars($tp['name'])?> [<?=$typeLabels[$tp['type']]??$tp['type']?>]<?=$tp['is_default']?' ★':''?></option>
                 <?php endforeach; ?>
             </select>
-            <button class="btn btn-outline" onclick="printOrder()"><i class="fa-solid fa-print"></i> 打印</button>
+            <button class="btn btn-outline" id="btnPrint" onclick="printOrder()"><i class="fa-solid fa-print"></i> 打印</button>
         </div>
         <a href="order.php" class="btn btn-outline"><i class="fa-solid fa-arrow-left"></i> 返回</a>
     </div>
@@ -175,13 +176,21 @@ $companyPhone = $pdo->query("SELECT setting_value FROM system_settings WHERE set
             <div><strong>已收金额：</strong><span style="color:var(--success)">¥<?= format_money($order['received_amount']) ?></span></div>
         </div>
         <div class="table-container"><table>
-            <thead><tr><th>#</th><th>SKU</th><th>商品名称</th><th>规格</th><th>单位</th><th>数量</th><th>单价</th><th>金额</th><th>备注</th></tr></thead>
+            <thead><tr><th style="width:52px;">图片</th><th>#</th><th>SKU</th><th>商品名称</th><th>规格</th><th>单位</th><th>数量</th><th>单价</th><th>金额</th><th>备注</th></tr></thead>
             <tbody>
                 <?php $i=1; foreach($items as $item): ?>
-                <tr><td><?=$i++?></td><td><?=$item['sku']?></td><td><?=htmlspecialchars($item['product_name'])?></td><td><?=$item['spec']?:'-'?></td><td><?=$item['unit_name']?:'-'?></td><td><?=$item['quantity']?></td><td>¥<?=format_money($item['price'])?></td><td>¥<?=format_money($item['amount'])?></td><td><?=htmlspecialchars($item['remark']??'')?:'-'?></td></tr>
+                <tr>
+                <td>
+                <?php if (!empty($item['product_image'])): ?>
+                <img src="../../<?= htmlspecialchars($item['product_image']) ?>" loading="lazy" decoding="async" style="width:40px;height:40px;object-fit:cover;border-radius:4px;cursor:pointer;" onclick="previewImage('../../<?= htmlspecialchars($item['product_image']) ?>')" title="点击放大" alt="">
+                <?php else: ?>
+                <span style="display:inline-block;width:40px;height:40px;background:var(--gray-100);border-radius:4px;text-align:center;line-height:40px;color:var(--gray-400);"><i class="fa-solid fa-box"></i></span>
+                <?php endif; ?>
+                </td>
+                <td><?=$i++?></td><td><?=$item['sku']?></td><td><?=htmlspecialchars($item['product_name'])?></td><td><?=$item['spec']?:'-'?></td><td><?=$item['unit_name']?:'-'?></td><td><?=$item['quantity']?></td><td>¥<?=format_money($item['price'])?></td><td>¥<?=format_money($item['amount'])?></td><td><?=htmlspecialchars($item['remark']??'')?:'-'?></td></tr>
                 <?php endforeach; ?>
             </tbody>
-            <tfoot><tr><td colspan="8" class="text-right"><strong>合计：</strong></td><td><strong>¥<?= format_money($order['total_amount']) ?></strong></td></tr></tfoot>
+            <tfoot><tr><td colspan="8" class="text-right"><strong>合计：</strong></td><td><strong>¥<?= format_money($order['total_amount']) ?></strong></td><td></td></tr></tfoot>
         </table></div>
         <?php if ($order['remark']): ?><div class="mt-2"><strong>总备注：</strong><?= nl2br(htmlspecialchars($order['remark'])) ?></div><?php endif; ?>
     </div>
@@ -272,7 +281,7 @@ function buildItemsHtml(items, templateHtml) {
                 if (item.image_base64) {
                     rows += '<td><img src="' + item.image_base64 + '" style="max-width:100px;max-height:75px;object-fit:contain;" alt=""></td>';
                 } else if (item.product_image) {
-                    rows += '<td><img src="../../' + item.product_image + '" style="max-width:100px;max-height:75px;object-fit:contain;" alt=""></td>';
+                    rows += '<td><img src="' + absUrl(item.product_image) + '" loading="lazy" style="max-width:100px;max-height:75px;object-fit:contain;" alt=""></td>';
                 } else {
                     rows += '<td style="color:#999;">-</td>';
                 }
@@ -335,7 +344,11 @@ function renderPrintContent() {
     }
     var html = currentTpl.content;
     for (var k in printData) {
-        html = html.replace(new RegExp('\\{'+k+'\\}', 'g'), printData[k]);
+        var v = String(printData[k] == null ? '' : printData[k]);
+        // 总备注可能分行：HTML 会把换行折叠成空格，转成 <br> 打印出来才能正常分行
+        if (k === 'remark') v = v.replace(/\n/g, '<br>');
+        // 用函数形式返回替换值：避免值里的 $& / $1 被当成正则捕获组引用而丢失
+        html = html.replace(new RegExp('\\{'+k+'\\}', 'g'), function(){ return v; });
     }
     html = html.replace(/\{items\}/g, buildItemsHtml(printItems, currentTpl.content));
     document.getElementById('printContent').innerHTML = html;
@@ -344,6 +357,8 @@ if (currentTpl) renderPrintContent();
 
 function printOrder() {
     if (!currentTpl) return;
+    // 先异步准备好商品图片（压缩后的 dataURL），再执行打印
+    runPrintAction(function () {
     renderPrintContent();
     var win = window.open('', '_blank', 'width=900,height=600');
     win.document.write('<html><head><title>销售单打印</title>');
@@ -353,6 +368,7 @@ function printOrder() {
     win.document.write('</body></html>');
     win.document.close();
     setTimeout(function(){win.print();}, 500);
+    }, { items: printItems, ids: ['btnPrint'] });
 }
 </script>
 

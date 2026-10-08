@@ -57,9 +57,9 @@ define('ITEMS_PER_PAGE', 20);
 define('LOW_STOCK_DAYS', 30);
 define('SECURE_HASH', '" . bin2hex(random_bytes(32)) . "');
 
-// CDN 资源配置（可修改为本地路径以支持离线部署）
-define('CDN_FONTAWESOME', 'https://cdn.bootcdn.net/ajax/libs/font-awesome/6.4.0/css/all.min.css');
-define('CDN_CHARTJS', 'https://cdn.bootcdn.net/ajax/libs/Chart.js/4.4.0/chart.umd.min.js');
+// CDN 资源配置（已本地化，无需联网）
+define('CDN_FONTAWESOME', 'assets/fontawesome/css/all.min.css');
+define('CDN_CHARTJS', 'assets/js/chart.js/chart.umd.min.js');
 
 // 安全模式：生产环境设为 true，禁止访问 check.php 等诊断工具
 define('PRODUCTION_MODE', false);
@@ -138,7 +138,7 @@ function getDB() {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>系统安装 - 进销存管理系统</title>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="../assets/fontawesome/css/all.min.css">
     <style>
         :root { --primary: #4361ee; --success: #10b981; --gray-100: #f1f5f9; --gray-200: #e2e8f0; --gray-300: #cbd5e1; --gray-500: #64748b; --gray-600: #475569; --gray-700: #334155; --gray-800: #1e293b; --danger: #ef4444; --radius: 8px; --radius-lg: 12px; --shadow: 0 1px 3px rgba(0,0,0,0.1); --shadow-lg: 0 10px 15px rgba(0,0,0,0.1); }
         * { margin: 0; padding: 0; box-sizing: border-box; }

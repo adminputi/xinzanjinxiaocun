@@ -31,8 +31,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
     } elseif ($action === 'delete') {
-        $pdo->prepare("DELETE FROM units WHERE id=?")->execute([intval($_POST['id']??0)]);
-        add_log(get_user_id(), 'delete', 'unit', "删除单位ID: " . intval($_POST['id']??0));
+        $id = intval($_POST['id'] ?? 0);
+        $chk = check_refs($id, ['商品' => "SELECT COUNT(*) FROM products WHERE unit_id=?"]);
+        if (!$chk['ok']) {
+            flash_set($chk['msg']);
+        } else {
+            $pdo->prepare("DELETE FROM units WHERE id=?")->execute([$id]);
+            add_log(get_user_id(), 'delete', 'unit', "删除单位ID: $id");
+            flash_set('单位已删除', 'success');
+        }
     }
     redirect("unit.php?page=$page&search=".urlencode($search));
 }
@@ -43,6 +50,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <button class="btn btn-primary" onclick="openUnitModal()"><i class="fa-solid fa-plus"></i> 新增单位</button>
 </div>
 <?php if (isset($error)): ?><div class="alert alert-danger"><?= $error ?></div><?php endif; ?>
+<?php flash_show(); ?>
 
 <form class="filter-bar" method="get">
     <div class="search-box"><i class="fa-solid fa-search"></i><input type="text" name="search" class="form-control" placeholder="搜索单位名称..." value="<?= htmlspecialchars($search) ?>"></div>

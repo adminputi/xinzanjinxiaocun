@@ -3,9 +3,19 @@
 if (isset($_GET['export']) && $_GET['export'] === 'xlsx') {
     @ob_start(); // 在最开始就开启缓冲，防止一切意外输出
     require_once __DIR__ . '/../../includes/auth.php';
+    // 导出归入「查看」范畴：能看商品就能导出，未登录/无查看权限的会被拦截
+    require_permission('product_view');
     require_once __DIR__ . '/../../includes/xlsx_helper.php';
     $pdo = getDB();
-    $allProducts = $pdo->query("SELECT p.sku, p.name, c.name as category, p.spec, u.name as unit, p.purchase_price, p.sale_price, COALESCE(inv.qty,0) as stock FROM products p LEFT JOIN product_categories c ON p.category_id=c.id LEFT JOIN units u ON p.unit_id=u.id LEFT JOIN (SELECT product_id, SUM(quantity) as qty FROM inventory GROUP BY product_id) inv ON p.id=inv.product_id WHERE p.status=1 ORDER BY p.id")->fetchAll();
+    // 跟随列表页当前的查询条件导出（与页面列表看到的一致，仍只导出启用商品）
+    $filter = build_product_filter();
+    $sql = "SELECT p.sku, p.name, c.name as category, p.spec, u.name as unit, p.purchase_price, p.sale_price, COALESCE(inv.qty,0) as stock
+        FROM products p LEFT JOIN product_categories c ON p.category_id=c.id LEFT JOIN units u ON p.unit_id=u.id
+        LEFT JOIN (SELECT product_id, SUM(quantity) as qty FROM inventory GROUP BY product_id) inv ON p.id=inv.product_id
+        WHERE p.status=1" . $filter['cond'] . " ORDER BY p.id";
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($filter['params']);
+    $allProducts = $stmt->fetchAll();
     $headers = ['SKU编码','商品名称','分类','规格','单位','采购价','销售价','库存'];
     $rows = array_map(function($r){ return [$r['sku'],$r['name'],$r['category']?:'',$r['spec'],$r['unit']?:'',$r['purchase_price'],$r['sale_price'],$r['stock']]; }, $allProducts);
     xlsx_export($headers, $rows, 'products_' . date('Ymd') . '.xlsx');
@@ -16,19 +26,12 @@ require_permission('product_view');
 
 $pdo = getDB();
 $page = max(1, intval($_GET['page'] ?? 1));
-$search = $_GET['search'] ?? '';
-$categoryId = intval($_GET['category_id'] ?? 0);
-
-$where = "WHERE 1=1";
-$params = [];
-if ($search) {
-    $where .= " AND (p.name LIKE ? OR p.sku LIKE ? OR p.barcode LIKE ?)";
-    $params = array_fill(0, 3, "%$search%");
-}
-if ($categoryId > 0) {
-    $where .= " AND p.category_id = ?";
-    $params[] = $categoryId;
-}
+// 查询条件（与 xlsx 导出、产品目录 PDF 共用，保证导出范围 = 当前筛选结果）
+$filter = build_product_filter();
+$search = $filter['search'];
+$categoryId = $filter['category_id'];
+$where = "WHERE 1=1" . $filter['cond'];
+$params = $filter['params'];
 
 $perPage = ITEMS_PER_PAGE;
 $offset = ($page - 1) * $perPage;
@@ -71,6 +74,11 @@ if ($lastSku) {
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_verify();
     $action = $_POST['action'] ?? '';
+    // 新增/修改商品需要 product_edit 权限（默认只有管理员拥有），后端必须校验，防止绕过按钮直接提交
+    if (in_array($action, ['save', 'delete']) && !check_permission('product_edit')) {
+        $error = '无权限：只有管理员或被授权的角色才能新增/修改/删除商品';
+        $action = '';
+    }
     if ($action === 'save') {
         $id = intval($_POST['id'] ?? 0);
         $data = [
@@ -92,7 +100,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $error = '商品名称和SKU编码不能为空';
         } else {
             if ($id > 0) {
-                if (get_user_role() === 'admin') {
+                // 启用/停用与其它编辑权限一致：有 product_edit 才能改状态
+                if (check_permission('product_edit')) {
                     $status = intval($_POST['status'] ?? 1);
                     $stmt = $pdo->prepare("UPDATE products SET sku=?,name=?,category_id=?,unit_id=?,spec=?,barcode=?,purchase_price=?,sale_price=?,min_stock=?,max_stock=?,remark=?,description=?,status=? WHERE id=?");
                     $stmt->execute([$data['sku'],$data['name'],$data['category_id'],$data['unit_id'],$data['spec'],$data['barcode'],$data['purchase_price'],$data['sale_price'],$data['min_stock'],$data['max_stock'],$data['remark'],$data['description'],$status,$id]);
@@ -112,21 +121,55 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } elseif ($action === 'delete') {
         $id = intval($_POST['id'] ?? 0);
         if ($id > 0 && check_permission('product_edit')) {
-            $pdo->prepare("DELETE FROM products WHERE id=?")->execute([$id]);
-            add_log(get_user_id(), 'delete', 'product', "删除商品ID: $id");
+            // 商品被任何单据引用即不可物理删除（历史单据会悬空、报表会失真），改为停用
+            $chk = check_refs($id, [
+                '采购订单'   => "SELECT COUNT(*) FROM purchase_order_items WHERE product_id=?",
+                '采购入库单' => "SELECT COUNT(*) FROM purchase_instock_items WHERE product_id=?",
+                '采购退货单' => "SELECT COUNT(*) FROM purchase_return_items WHERE product_id=?",
+                '销售订单'   => "SELECT COUNT(*) FROM sales_order_items WHERE product_id=?",
+                '销售报价'   => "SELECT COUNT(*) FROM sales_quote_items WHERE product_id=?",
+                '销售出库单' => "SELECT COUNT(*) FROM sales_outstock_items WHERE product_id=?",
+                '销售退货单' => "SELECT COUNT(*) FROM sales_return_items WHERE product_id=?",
+                '调拨单'     => "SELECT COUNT(*) FROM transfer_items WHERE product_id=?",
+                '盘点单'     => "SELECT COUNT(*) FROM check_items WHERE product_id=?",
+                '报损单'     => "SELECT COUNT(*) FROM loss_items WHERE product_id=?",
+                '库存记录'   => "SELECT COUNT(*) FROM inventory WHERE product_id=? AND quantity<>0",
+            ]);
+            if (!$chk['ok']) {
+                flash_set($chk['msg']);
+            } else {
+                $name = $pdo->prepare("SELECT name FROM products WHERE id=?");
+                $name->execute([$id]);
+                $pname = $name->fetchColumn();
+                $pdo->beginTransaction();
+                try {
+                    $pdo->prepare("DELETE FROM product_images WHERE product_id=?")->execute([$id]);
+                    $pdo->prepare("DELETE FROM inventory WHERE product_id=? AND quantity=0")->execute([$id]);
+                    $pdo->prepare("DELETE FROM products WHERE id=?")->execute([$id]);
+                    add_log(get_user_id(), 'delete', 'product', "删除商品: {$pname}(ID:$id)");
+                    $pdo->commit();
+                    flash_set('商品已删除：' . $pname, 'success');
+                } catch (Exception $e) {
+                    $pdo->rollBack();
+                    flash_set('删除失败：' . $e->getMessage());
+                }
+            }
         }
         redirect("list.php?page=$page");
     }
 }
 ?>
 
+<?php flash_show(); ?>
 <div class="page-header">
     <h1 class="page-title"><i class="fa-solid fa-box"></i> 商品管理</h1>
     <div class="page-actions">
+        <?php if (check_permission('product_edit')): ?>
         <a href="import.php?type=product" class="btn btn-outline"><i class="fa-solid fa-upload"></i> 导入</a>
+        <button class="btn btn-primary" onclick="openNewProduct()"><i class="fa-solid fa-plus"></i> 新增商品</button>
+        <?php endif; ?>
         <button class="btn btn-outline" onclick="exportProducts()"><i class="fa-solid fa-download"></i> 导出</button>
         <button class="btn btn-outline" onclick="exportCatalogPDF()"><i class="fa-solid fa-file-pdf"></i> 导出PDF</button>
-        <button class="btn btn-primary" onclick="openNewProduct()"><i class="fa-solid fa-plus"></i> 新增商品</button>
     </div>
 </div>
 
@@ -199,8 +242,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         <td>
                             <div class="table-actions">
                                 <button class="btn btn-sm btn-outline" onclick="viewProductDetail(<?= $item['id'] ?>)" title="查看详情"><i class="fa-solid fa-eye"></i></button>
+                                <?php if (check_permission('product_edit')): ?>
                                 <button class="btn btn-sm btn-outline btn-edit-product" data-product="<?= htmlspecialchars(json_encode($item, JSON_UNESCAPED_UNICODE), ENT_QUOTES, 'UTF-8') ?>"><i class="fa-solid fa-pen"></i></button>
-                                <?php if (check_permission('product_view')): ?>
                                 <button class="btn btn-sm btn-outline" onclick="deleteProduct(<?= $item['id'] ?>)"><i class="fa-solid fa-trash" style="color:var(--danger)"></i></button>
                                 <?php endif; ?>
                             </div>
@@ -304,7 +347,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     <label class="form-label">备注</label>
                     <textarea name="remark" id="premark" class="form-control" rows="2"></textarea>
                 </div>
-                <?php if (get_user_role() === 'admin'): ?>
+                <?php if (check_permission('product_edit')): ?>
                 <div class="form-row">
                     <div class="form-group">
                         <label class="form-label">状态</label>
@@ -580,11 +623,21 @@ function escHtml(str) {
     return div.innerHTML;
 }
 
+// 当前页面的筛选条件（关键词/分类），导出时原样带上，做到「查什么就导出什么」
+function currentFilterQuery() {
+    var qs = new URLSearchParams(window.location.search);
+    var p = new URLSearchParams();
+    var s = qs.get('search'), c = qs.get('category_id');
+    if (s) p.set('search', s);
+    if (c && c !== '0') p.set('category_id', c);
+    p.set('t', Date.now());
+    return p.toString();
+}
 function exportProducts() {
-    window.open('list.php?export=xlsx&t=' + Date.now());
+    window.open('list.php?export=xlsx&' + currentFilterQuery());
 }
 function exportCatalogPDF() {
-    window.open('catalog_print.php?t=' + Date.now());
+    window.open('catalog_print.php?' + currentFilterQuery());
 }
 </script>
 

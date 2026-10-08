@@ -5,7 +5,7 @@ $pdo = getDB();
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_verify();
-    $allowedKeys = ['site_name', 'company_name', 'company_address', 'company_phone', 'low_stock_days', 'items_per_page', 'captcha_enabled', 'print_tracking_code', 'auth_server_url', 'auth_api_key', 'auth_api_secret'];
+    $allowedKeys = ['site_name', 'company_name', 'company_address', 'company_phone', 'low_stock_days', 'items_per_page', 'captcha_enabled', 'print_tracking_code', 'allow_negative_stock', 'auth_server_url', 'auth_api_key', 'auth_api_secret'];
     foreach ($_POST as $key => $val) {
         if (in_array($key, $allowedKeys)) {
             // 使用预处理语句安全查询
@@ -85,6 +85,16 @@ foreach ($rows as $r) { $settings[$r['setting_key']] = $r['setting_value']; }
                         <option value="1" <?= ($settings['print_tracking_code']??'1')!=='0'?'selected':'' ?>>开启</option>
                     </select>
                     <small style="color:var(--gray-500);">开启后打印出库单/销售单时显示售后追踪码及二维码</small>
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label class="form-label">允许负库存</label>
+                    <select name="allow_negative_stock" class="form-control">
+                        <option value="0" <?= ($settings['allow_negative_stock']??'0')==='0'?'selected':'' ?>>禁止（推荐）</option>
+                        <option value="1" <?= ($settings['allow_negative_stock']??'0')==='1'?'selected':'' ?>>允许</option>
+                    </select>
+                    <small style="color:var(--gray-500);">禁止时，出库/退货/报损/调拨等扣减操作若导致库存为负会被拦截并提示。历史数据已存在负库存的，请先到「库存校验」处理。</small>
                 </div>
             </div>
         </div>

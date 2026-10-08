@@ -11,6 +11,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $name = $_POST['name'] ?? '';
         $description = $_POST['description'] ?? '';
         $permissions = $_POST['permissions'] ?? [];
+        if (!is_array($permissions)) $permissions = [];
+        // 只接受已知权限码，防止伪造提交
+        $permissions = array_values(array_intersect($permissions, array_keys(perm_code_list())));
+        // 未获得商业授权的功能（如售后追踪、CRM）不允许通过表单改动：一律沿用数据库中的原值。
+        // 这样授权到期时不会误清空已有权限，授权恢复后自动生效。
+        if ($id > 0) {
+            $oldStmt = $pdo->prepare("SELECT permissions FROM roles WHERE id=?");
+            $oldStmt->execute([$id]);
+            $oldPerms = json_decode($oldStmt->fetchColumn() ?: '[]', true);
+            if (is_array($oldPerms)) {
+                foreach ($oldPerms as $op) {
+                    if (!perm_is_licensed($op) && !in_array($op, $permissions, true)) {
+                        $permissions[] = $op;
+                    }
+                }
+            }
+        } else {
+            // 新增角色：未授权的功能一律不赋权
+            $permissions = array_values(array_filter($permissions, function ($p) { return perm_is_licensed($p); }));
+        }
         if (empty($name)) { $error = '角色名称不能为空'; }
         else {
             $permJson = json_encode($permissions, JSON_UNESCAPED_UNICODE);
@@ -32,22 +52,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 $roles = $pdo->query("SELECT r.*, (SELECT COUNT(*) FROM users WHERE role_id=r.id) as user_count FROM roles r ORDER BY id")->fetchAll();
 
-// 所有权限定义
-$allPerms = [
-    'dashboard' => '首页看板',
-    'master_data' => '主数据模块',
-    'product_view' => '商品查看', 'product_category' => '商品分类管理', 'warehouse_view' => '仓库查看',
-    'customer_view' => '客户查看', 'supplier_view' => '供应商查看',
-    'purchase_order' => '采购订单', 'purchase_instock' => '采购入库', 'purchase_return' => '采购退货', 'purchase_reconcile' => '采购对账',
-    'sales_quote' => '销售报价', 'sales_order' => '销售订单', 'sales_outstock' => '销售出库', 'sales_return' => '销售退货', 'sales_reconcile' => '客户对账', 'print_template' => '打印模板',
-    'inventory_view' => '库存查看', 'inventory_log' => '库存变动', 'transfer_manage' => '调拨管理', 'check_manage' => '盘点管理', 'loss_manage' => '报损报溢',
-    'finance_arpay' => '应收应付', 'finance_receive' => '收款记录', 'finance_payment' => '付款记录', 'finance_aging' => '账龄分析',
-    'report_sales' => '销售报表', 'report_purchase' => '采购报表', 'report_inventory' => '库存报表', 'report_performance' => '业绩报表', 'report_io' => '出入库汇总',
-    'system_users' => '用户管理', 'system_roles' => '角色管理', 'system_logs' => '操作日志', 'system_settings' => '系统设置',
-    'crm_customer_view' => 'CRM客户查看', 'crm_customer_edit' => 'CRM客户编辑', 'crm_pool_claim' => 'CRM公海认领',
-    'crm_pool_manage' => 'CRM公海管理', 'crm_followup_view' => 'CRM跟进查看', 'crm_followup_add' => 'CRM跟进添加',
-    'crm_source_manage' => 'CRM来源管理', 'crm_report' => 'CRM报表', 'crm_setting' => 'CRM公海设置',
-];
+// 所有权限定义（取自 includes/functions.php 的 perm_code_list()，保证全局唯一来源）
+$allPerms = perm_code_list();
+
+// 统计当前未获授权的功能（对应权限项在界面上置灰不可选）
+$lockedPermCount = 0;
+$lockedFeatures = [];
+foreach (array_keys($allPerms) as $pk) {
+    if (perm_is_licensed($pk)) continue;
+    $lockedPermCount++;
+    $feature = perm_requires_feature($pk);
+    if ($feature !== null && !isset($lockedFeatures[$feature])) {
+        $lockedFeatures[$feature] = ['tracking' => '售后追踪', 'crm' => 'CRM'][$feature] ?? $feature;
+    }
+}
+$lockedFeatureNames = array_values($lockedFeatures);
 ?>
 
 <div class="page-header">
@@ -85,9 +104,17 @@ $allPerms = [
         <div class="form-group"><label class="form-label">描述</label><input type="text" name="description" id="rdesc" class="form-control"></div>
     </div>
     <div class="form-group"><label class="form-label">权限设置</label>
+        <?php if ($lockedPermCount > 0): ?>
+        <div style="margin-bottom:8px;padding:8px 10px;background:#fffbeb;border:1px solid #fde68a;border-radius:var(--radius);font-size:12px;color:#92400e;">
+            <i class="fa-solid fa-triangle-exclamation"></i> 有 <?=$lockedPermCount?> 项功能（<?=htmlspecialchars(implode('、', $lockedFeatureNames))?>）当前未获得授权，已置为<strong>灰色不可选</strong>；如需赋权请先完成功能授权。
+        </div>
+        <?php endif; ?>
         <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:6px;max-height:400px;overflow-y:auto;padding:12px;border:1px solid var(--gray-200);border-radius:var(--radius);">
-            <?php foreach ($allPerms as $pk => $pv): ?>
-            <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;"><input type="checkbox" name="permissions[]" value="<?=$pk?>" class="perm-check"> <?=$pv?></label>
+            <?php foreach ($allPerms as $pk => $pv): $licensed = perm_is_licensed($pk); ?>
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:<?=$licensed?'pointer':'not-allowed'?>;" title="<?= $licensed ? htmlspecialchars($pk) : htmlspecialchars($pv . '：该功能未授权，无法赋权') ?>">
+                <input type="checkbox" name="permissions[]" value="<?=$pk?>" class="perm-check" <?= $licensed ? '' : 'disabled' ?>>
+                <span style="<?= $licensed ? '' : 'color:var(--gray-400);' ?>"><?=$pv?><?= $licensed ? '' : ' <small style="color:#b45309;">（未授权）</small>' ?></span>
+            </label>
             <?php endforeach; ?>
         </div>
     </div>

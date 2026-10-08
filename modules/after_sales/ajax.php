@@ -40,6 +40,7 @@ if ($action === 'verify_password') {
         json_response(false, '密码错误');
     }
     unset($_SESSION[$rateKey]);
+    $_SESSION['verified_codes'][$code] = time(); // 记录已通过密码验证
     json_response(true, '验证通过');
 }
 
@@ -47,10 +48,24 @@ if ($action === 'get_tracking_public') {
     $code = trim($_GET['code'] ?? '');
     if (!$code) json_response(false, '参数错误');
 
+    // 公开接口必须先通过密码验证；已登录且具备「追踪码查看」权限的用户放行（无权限者仍需密码验证）
+    $loggedIn = !empty($_SESSION['user_id']) && check_tracking_perm(false);
+    $verified = !empty($_SESSION['verified_codes'][$code]);
+    if (!$loggedIn && !$verified) {
+        json_response(false, '请先完成密码验证');
+    }
+
     $stmt = $pdo->prepare("SELECT * FROM tracking_codes WHERE tracking_no=?");
     $stmt->execute([$code]);
     $row = $stmt->fetch();
     if (!$row) json_response(false, '追踪码不存在');
+
+    // 数据隔离：已登录但对该追踪码没有归属权的员工（例如别的销售），
+    // 与扫码客户同等对待 —— 需要密码验证，且返回脱敏数据
+    if ($loggedIn && !tracking_owner_ok($pdo, $row['id'])) {
+        $loggedIn = false;
+        if (!$verified) json_response(false, '请先完成密码验证');
+    }
 
     $row['tracking_data'] = !empty($row['tracking_data']) ? json_decode($row['tracking_data'], true) : [];
 
@@ -87,11 +102,80 @@ if ($action === 'get_tracking_public') {
     $its->execute([$row['id']]);
     $row['items'] = $its->fetchAll();
 
+    unset($row['password']); // 密码哈希不允许出现在公开接口
+
+    // 扫码页及无权限用户脱敏；后台已授权用户返回明码
+    if (!$loggedIn) {
+        $row = mask_tracking_public_data($row);
+    }
+
     json_response(true, '', $row);
 }
 
 // ========== 以下需要登录 ==========
 if (!isset($_SESSION['user_id'])) json_response(false, '请先登录');
+
+// ---------- 售后追踪权限矩阵 ----------
+// 查看级：查数据、看二维码（tracking_view 或 tracking_edit 均可）
+// 编辑级：生成/编辑追踪码、添加流程、添加售后（tracking_edit）
+// 状态级：维护追踪状态（tracking_status，默认仅管理员）
+// 删除级：删除追踪码 / 状态 / 流程 / 售后 —— 一律仅管理员，任何角色都不可通过赋权获得
+$trackingReadActions  = ['search_outstocks', 'get_outstock_info', 'list_statuses', 'get_tracking', 'generate_qrcode', 'save_qrcode_image'];
+$trackingEditActions  = ['save_tracking', 'update_tracking', 'add_process', 'add_after_sales', 'upload_image', 'edit_process', 'edit_after_sales'];
+$trackingStatusActions = ['save_status'];
+$trackingDeleteActions = ['delete_tracking', 'delete_status', 'delete_process', 'delete_after_sales'];
+
+if (in_array($action, $trackingReadActions, true) && !check_tracking_perm(false)) {
+    json_response(false, '无权限：需要「追踪码查看」权限');
+}
+if (in_array($action, $trackingEditActions, true) && !check_tracking_perm(true)) {
+    json_response(false, '无权限：需要「追踪码编辑」权限');
+}
+if (in_array($action, $trackingStatusActions, true) && !check_permission('tracking_status')) {
+    json_response(false, '无权限：追踪状态管理仅管理员或被授权角色可操作');
+}
+if (in_array($action, $trackingDeleteActions, true) && ($_SESSION['user_role'] ?? '') !== 'admin') {
+    json_response(false, '无权限：删除操作仅管理员可执行');
+}
+
+// ---------- 数据归属校验 ----------
+// 除管理员 / 拥有 tracking_all 的角色外，只能访问「归属自己客户」的追踪码，
+// 防止在列表之外直接构造请求访问或修改他人客户的追踪数据。
+if (!check_tracking_all()) {
+    $ownerTrackingId = 0;    // tracking_codes.id
+    $ownerOutstockId = 0;    // sales_outstocks.id（生成追踪码前的选择）
+    $ownerChild = null;      // [表名, 记录ID]：流程 / 售后记录
+    switch ($action) {
+        case 'get_tracking':
+        case 'generate_qrcode':
+        case 'save_qrcode_image':
+            $ownerTrackingId = intval($_GET['id'] ?? 0); break;
+        case 'update_tracking':
+        case 'delete_tracking':
+            $ownerTrackingId = intval($_POST['id'] ?? 0); break;
+        case 'add_process':
+        case 'add_after_sales':
+            $ownerTrackingId = intval($_POST['tracking_id'] ?? 0); break;
+        case 'edit_process':
+        case 'delete_process':
+            $ownerChild = ['tracking_processes', intval($_POST['id'] ?? 0)]; break;
+        case 'edit_after_sales':
+        case 'delete_after_sales':
+            $ownerChild = ['tracking_after_sales', intval($_POST['id'] ?? 0)]; break;
+        case 'save_tracking':
+        case 'get_outstock_info':
+            $ownerOutstockId = intval(($_POST['outstock_id'] ?? 0) ?: ($_GET['outstock_id'] ?? 0)); break;
+    }
+    if ($ownerTrackingId > 0 && !tracking_owner_ok($pdo, $ownerTrackingId)) {
+        json_response(false, '无权限：该追踪码不属于您负责的客户');
+    }
+    if ($ownerOutstockId > 0 && !outstock_owner_ok($pdo, $ownerOutstockId)) {
+        json_response(false, '无权限：该出库单不属于您负责的客户');
+    }
+    if ($ownerChild !== null && $ownerChild[1] > 0 && !tracking_child_owner_ok($pdo, $ownerChild[0], $ownerChild[1])) {
+        json_response(false, '无权限：该记录不属于您负责的客户');
+    }
+}
 
 // ---------- 出库单搜索 ----------
 if ($action === 'search_outstocks') {
@@ -115,6 +199,10 @@ if ($action === 'search_outstocks') {
     }
     if ($dateFrom) { $sql .= " AND o.outstock_date >= ?"; $params[] = $dateFrom; }
     if ($dateTo)   { $sql .= " AND o.outstock_date <= ?"; $params[] = $dateTo; }
+    // 数据隔离：只能搜到「归属自己客户」的出库单，避免给他人客户的单生成追踪码
+    $scope = tracking_scope_where();
+    $sql .= $scope['where'];
+    $params = array_merge($params, $scope['params']);
     $sql .= " ORDER BY o.id DESC LIMIT 50";
 
     $stmt = $pdo->prepare($sql);
@@ -447,17 +535,24 @@ if ($action === 'add_after_sales') {
     json_response(true, '添加成功');
 }
 
-// ---------- 编辑/删除流程 & 售后（仅管理员） ----------
+// ---------- 编辑/删除流程 & 售后 ----------
+// 权限已由上方「售后追踪权限矩阵」统一判定：编辑类需 tracking_edit，删除类仅管理员
 if (in_array($action, ['edit_process','delete_process','edit_after_sales','delete_after_sales'])) {
-    if ($_SESSION['user_role'] !== 'admin') json_response(false, '仅管理员可操作');
     // csrf_verify 失败会 die(HTML)，对 AJAX 不友好，自己校验返回 JSON
     if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $token = $_POST['_csrf_token'] ?? '';
-        if (empty($_SESSION['csrf_token']) || !hash_equals($_SESSION['csrf_token'], $token)) {
-            $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
-            json_response(false, '安全验证失败，请刷新页面后重试');
+        if (!csrf_is_valid($token)) {
+            csrf_regenerate();
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode([
+                'success' => false,
+                'message' => '页面已过期（安全验证失败），请刷新页面后重试',
+                'csrf_expired' => true,
+                'csrf_token' => $_SESSION['csrf_token'],
+            ], JSON_UNESCAPED_UNICODE);
+            exit;
         }
-        $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+        // 校验通过后不再轮换令牌，避免同一会话其它页面的令牌失效
     }
 }
 

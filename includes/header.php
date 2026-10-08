@@ -40,7 +40,7 @@ $pageTitle = get_page_name($_SERVER['SCRIPT_NAME']);
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title><?= $siteDisplayName ?></title>
     <link rel="stylesheet" href="<?= $basePath ?>assets/css/style.css">
-    <link rel="stylesheet" href="<?= CDN_FONTAWESOME ?>">
+    <link rel="stylesheet" href="<?= $basePath ?>assets/fontawesome/css/all.min.css">
 </head>
 <body>
 <div class="app-container">
@@ -58,14 +58,14 @@ $pageTitle = get_page_name($_SERVER['SCRIPT_NAME']);
                 if (isset($menu['children'])) {
                     $visibleChildren = [];
                     foreach ($menu['children'] as $child) {
-                        if (empty($child['perm']) || check_permission($child['perm'])) {
+                        if (empty($child['perm']) || menu_perm_ok($child['perm'])) {
                             $visibleChildren[] = $child;
                         }
                     }
                     if (empty($visibleChildren)) continue;
                 } else {
                     // 没有子菜单的菜单项：直接检查自身权限
-                    if (!empty($menu['perm']) && !check_permission($menu['perm'])) continue;
+                    if (!empty($menu['perm']) && !menu_perm_ok($menu['perm'])) continue;
                     $visibleChildren = [];
                 }
             ?>
@@ -143,6 +143,8 @@ $pageTitle = get_page_name($_SERVER['SCRIPT_NAME']);
             </div>
         </header>
         <div class="content-wrapper">
+<?php // 全局 CSRF 令牌：AJAX 操作（列表页删除/转订单等）从这里取，避免依赖某个表单 ?>
+<input type="hidden" name="_csrf_token" id="globalCsrfToken" value="<?= csrf_token() ?>">
 <?php
 // 授权状态提醒横幅
 $_licenseAlert = null;
@@ -169,7 +171,7 @@ if ($_licenseAlert):
         <div class="modal-body">
             <div id="profileMsg" style="display:none;margin-bottom:12px;"></div>
             <h4 class="profile-section-title">基本信息</h4>
-            <form id="profileForm" onsubmit="return saveProfile(event)">
+            <form id="profileForm">
             <?= csrf_field() ?>
             <div class="form-group"><label class="form-label">用户名</label><input type="text" class="form-control" value="<?= get_user_name() ?>" disabled></div>
             <div class="form-group"><label class="form-label">真实姓名</label><input type="text" name="real_name" class="form-control" id="profRealName"></div>
@@ -182,7 +184,7 @@ if ($_licenseAlert):
             <hr class="profile-divider">
             <h4 class="profile-section-title">修改密码</h4>
             <div id="pwdMsg" style="display:none;margin-bottom:12px;"></div>
-            <form id="passwordForm" onsubmit="return changePassword(event)">
+            <form id="passwordForm">
             <?= csrf_field() ?>
             <div class="form-row">
                 <div class="form-group"><label class="form-label">原密码 <span class="required">*</span></label><input type="password" name="old_password" class="form-control" required></div>
@@ -210,17 +212,33 @@ document.addEventListener('click', function(e) {
     }
 });
 // 加载用户信息到编辑资料弹窗
-(function(){
+function loadProfileInfo(){
     fetch('<?= $siteRoot ?>/api/profile.php?action=get', {credentials:'same-origin'})
     .then(function(r){return r.json();})
     .then(function(resp){
-        if(resp.success && resp.data) {
-            document.getElementById('profRealName').value = resp.data.real_name || '';
-            document.getElementById('profEmail').value = resp.data.email || '';
-            document.getElementById('profPhone').value = resp.data.phone || '';
-        }
-    });
-})();
+        if(!resp.success || !resp.data) return;
+        var rn = document.getElementById('profRealName');
+        var em = document.getElementById('profEmail');
+        var ph = document.getElementById('profPhone');
+        if (rn) rn.value = resp.data.real_name || '';
+        if (em) em.value = resp.data.email || '';
+        if (ph) ph.value = resp.data.phone || '';
+    })
+    .catch(function(){});
+}
+window.loadProfileInfo = loadProfileInfo;
+loadProfileInfo();
+var _profileReBind = false;
+function bindProfileForm() {
+    var pf = document.getElementById('profileForm');
+    var pwf = document.getElementById('passwordForm');
+    // 未绑定过才绑定；用 assign 方式避免 AJAX 导航后重复绑定
+    if (pf && !pf.__bound) { pf.__bound = true; pf.onsubmit = saveProfile; }
+    if (pwf && !pwf.__bound) { pwf.__bound = true; pwf.onsubmit = changePassword; }
+}
+// AJAX 导航替换内容后，新注入的表单需要重新绑定
+window.rebindPageForms = bindProfileForm;
+document.addEventListener('DOMContentLoaded', bindProfileForm);
 function saveProfile(e) {
     e.preventDefault();
     var msg = document.getElementById('profileMsg');
@@ -243,7 +261,7 @@ function saveProfile(e) {
     return false;
 }
 function changePassword(e) {
-    e.preventDefault();
+    if (e && e.preventDefault) e.preventDefault();
     var form = document.getElementById('passwordForm');
     var oldPwd = form.old_password.value.trim();
     var newPwd = form.new_password.value.trim();
@@ -281,6 +299,8 @@ function changePassword(e) {
     <?php endif; ?>
 </div>
 <div class="content-wrapper">
+<?php // AJAX 导航不会渲染顶部资料表单，这里补一个全局令牌，保证列表页 AJAX 操作可用 ?>
+<input type="hidden" name="_csrf_token" id="globalCsrfToken" value="<?= csrf_token() ?>">
 <?php
 // AJAX路径也加载授权提醒
 if (file_exists(__DIR__ . '/license.php') && function_exists('license_get_alert')) {

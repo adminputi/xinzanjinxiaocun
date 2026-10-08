@@ -2,8 +2,12 @@
 require_once __DIR__ . '/../../includes/header.php';
 require_permission('crm_customer_view');
 $pdo = getDB();
+require_once __DIR__ . '/../../includes/migration.php';
+run_migrations();
 $isAdmin = (get_user_role() === 'admin');
 $userId = get_user_id();
+// 是否有编辑跟进记录的权限（管理员恒为 true，其他角色需在角色管理中勾选 crm_followup_edit）
+$canEditFollowup = check_permission('crm_followup_edit');
 $id = intval($_GET['id'] ?? 0);
 if (!$id) die('缺少客户ID');
 
@@ -11,6 +15,7 @@ $stmt = $pdo->prepare("SELECT c.*, s.name as source_name, u.real_name as owner_n
     (SELECT COALESCE(SUM(total_amount),0) FROM sales_orders WHERE customer_id=c.id AND status NOT IN('draft','cancelled')) as total_sales,
     (SELECT COUNT(*) FROM sales_orders WHERE customer_id=c.id) as order_count,
     (SELECT COUNT(*) FROM customer_followups WHERE customer_id=c.id) as followup_count,
+    " . sql_customer_deal_stats('c') . ",
     (SELECT COALESCE(SUM(total_amount - received_amount),0) FROM sales_orders WHERE customer_id=c.id AND status NOT IN('draft','cancelled')) as ar_balance
     FROM customers c
     LEFT JOIN customer_sources s ON c.source_id=s.id
@@ -20,8 +25,13 @@ $stmt->execute([$id]);
 $cust = $stmt->fetch();
 if (!$cust) die('客户不存在');
 
+// 应收余额改用统一口径：订单总额 - 已收 + 期初应收 - 已确认退货
+// 与首页看板、应收应付、账龄分析、客户对账保持一致
+$arRows = get_ar_by_customer($id);
+$cust['ar_balance'] = $arRows ? $arRows[0]['balance'] : 0;
+
 // 跟进记录
-$followups = $pdo->prepare("SELECT f.*, u.real_name as user_name FROM customer_followups f LEFT JOIN users u ON f.user_id=u.id WHERE f.customer_id=? ORDER BY f.created_at DESC");
+$followups = $pdo->prepare("SELECT f.*, u.real_name as user_name, ue.real_name as updated_by_name FROM customer_followups f LEFT JOIN users u ON f.user_id=u.id LEFT JOIN users ue ON f.updated_by=ue.id WHERE f.customer_id=? ORDER BY f.created_at DESC");
 $followups->execute([$id]);
 $followupList = $followups->fetchAll();
 
@@ -54,7 +64,7 @@ $statusBadges = ['draft'=>'warning','confirmed'=>'info','shipped'=>'success','pa
     <div class="card-body">
         <div style="display:grid;grid-template-columns:2fr 1fr;gap:24px;">
             <div>
-                <h2 style="margin:0 0 8px;"><?=htmlspecialchars($cust['name'])?> <small style="color:var(--gray-500);">[<?=htmlspecialchars($cust['code'])?>]</small></h2>
+                <h2 style="margin:0 0 8px;"><?=htmlspecialchars($cust['name'])?> <small style="color:var(--gray-500);">[<?=htmlspecialchars($cust['code'])?>]</small><?php if (customer_is_deal($cust)): ?> <span class="badge badge-success" title="<?=htmlspecialchars(customer_deal_tip($cust))?>">已成交</span><?php endif; ?></h2>
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:14px;">
                     <div><strong>类型：</strong><?=$cust['type']=='company'?'企业':'个人'?></div>
                     <div><strong>电话：</strong><?=htmlspecialchars($cust['phone'])?:'-'?></div>
@@ -79,6 +89,10 @@ $statusBadges = ['draft'=>'warning','confirmed'=>'info','shipped'=>'success','pa
                     <div style="text-align:center;"><div style="font-size:24px;font-weight:bold;"><?=$cust['followup_count']?></div><div style="font-size:12px;color:var(--gray-500);">跟进次数</div></div>
                 </div>
                 <?php if ($cust['last_followed_at']): ?><div style="text-align:center;margin-top:8px;font-size:12px;color:var(--gray-500);">最后跟进：<?=$cust['last_followed_at']?></div><?php endif; ?>
+                <?php if (customer_is_deal($cust)): ?><div style="text-align:center;margin-top:4px;font-size:12px;color:var(--success,#28a745);">
+                    成交 <?=intval($cust['deal_order_count'])?> 单 · 累计 ¥<?=format_money($cust['deal_amount'])?>
+                    · 最近成交 <?=($cust['last_deal_date'] && $cust['last_deal_date'] !== '0000-00-00') ? htmlspecialchars($cust['last_deal_date']) : '--'?>
+                </div><?php endif; ?>
             </div>
         </div>
 
@@ -134,9 +148,15 @@ $statusBadges = ['draft'=>'warning','confirmed'=>'info','shipped'=>'success','pa
             <div style="margin-top:4px;display:flex;gap:8px;align-items:center;">
                 <span class="badge badge-<?=$f['result']=='已成交'?'success':($f['result']=='有意向'?'primary':($f['result']=='无意向'?'danger':'warning'))?>"><?=$f['result']?></span>
                 <?php if ($f['next_follow_at']): ?><span style="font-size:12px;color:var(--gray-500);">计划下次跟进：<?=$f['next_follow_at']?></span><?php endif; ?>
+                <?php if ($canEditFollowup): ?>
+                <button class="btn btn-sm btn-outline" style="padding:2px 8px;font-size:12px;" onclick="editFollowup(<?=$f['id']?>)" title="编辑此跟进"><i class="fa-solid fa-pen"></i> 编辑</button>
+                <?php endif; ?>
             </div>
             <?php if ($f['attachment']): ?>
-            <div style="margin-top:4px;">📎 <a href="../../<?=htmlspecialchars($f['attachment'])?>" target="_blank">查看附件</a></div>
+            <div style="margin-top:4px;">📎 <a href="../../<?=htmlspecialchars($f['attachment'])?>" target="_blank" download="<?=htmlspecialchars($f['attachment_name'] ?? '')?>" title="<?=htmlspecialchars($f['attachment_name'] ?? '')?>"><?=htmlspecialchars($f['attachment_name'] ?? '') ?: '查看附件'?></a></div>
+            <?php endif; ?>
+            <?php if (!empty($f['updated_by'])): ?>
+            <div style="font-size:12px;color:var(--gray-400);margin-top:2px;"><i class="fa-solid fa-pen"></i> 由 <?=htmlspecialchars($f['updated_by_name'] ?: ('用户#'.$f['updated_by']))?> 修改于 <?=$f['updated_at']?></div>
             <?php endif; ?>
         </div>
         <?php endforeach; ?>
@@ -197,10 +217,11 @@ $statusBadges = ['draft'=>'warning','confirmed'=>'info','shipped'=>'success','pa
 </div>
 
 <!-- 跟进弹窗 -->
-<div class="modal-overlay" id="followupModal"><div class="modal modal-md"><div class="modal-header"><h3 class="modal-title">添加跟进 - <span id="fuCustomerName"></span></h3><button class="modal-close" onclick="closeModal('followupModal')">&times;</button></div>
+<div class="modal-overlay" id="followupModal"><div class="modal modal-md"><div class="modal-header"><h3 class="modal-title"><span id="fuModalTitle">添加跟进</span> - <span id="fuCustomerName"></span></h3><button class="modal-close" onclick="closeModal('followupModal')">&times;</button></div>
 <form id="followupForm" onsubmit="return saveFollowup(event)" enctype="multipart/form-data">
 <?=csrf_field()?>
 <input type="hidden" name="customer_id" id="fuCustomerId">
+<input type="hidden" name="id" id="fuId">
 <div class="modal-body">
     <div class="form-row">
         <div class="form-group"><label class="form-label">跟进类型</label>
@@ -219,7 +240,10 @@ $statusBadges = ['draft'=>'warning','confirmed'=>'info','shipped'=>'success','pa
     </div>
     <div class="form-row">
         <div class="form-group"><label class="form-label">上传附件</label>
-            <input type="file" name="attachment" class="form-control">
+            <input type="file" name="attachment" class="form-control" accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.pdf,.zip,.rar">
+            <small style="color:var(--gray-500);">支持 JPG/PNG/GIF/WEBP 图片、Word/Excel/PPT、PDF、RAR/ZIP，单个最大 50MB</small>
+            <div id="fuCurrentAttach" style="font-size:12px;color:var(--gray-500);margin-top:4px;"></div>
+            <label id="fuRemoveWrap" style="display:none;font-size:12px;margin-top:4px;cursor:pointer;color:var(--danger);"><input type="checkbox" id="fuRemove"> 删除当前附件</label>
         </div>
         <div class="form-group"><label class="form-label">计划下次跟进</label>
             <input type="date" name="next_follow_at" class="form-control">
@@ -228,7 +252,7 @@ $statusBadges = ['draft'=>'warning','confirmed'=>'info','shipped'=>'success','pa
 </div>
 <div class="modal-footer">
     <button type="button" class="btn btn-outline" onclick="closeModal('followupModal')">取消</button>
-    <button type="submit" class="btn btn-primary">保存跟进</button>
+    <button type="submit" class="btn btn-primary" id="fuSubmitBtn">保存跟进</button>
 </div>
 </form></div></div>
 
@@ -293,17 +317,71 @@ function switchTab(name,e){
     document.querySelector('.tab-nav a[href="#tab-'+name+'"]').classList.add('active');
     document.getElementById('tab-'+name).classList.add('active');
 }
+var CAN_EDIT_FOLLOWUP = <?= $canEditFollowup ? 'true' : 'false' ?>;
+function escHtml(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+// 清空表单并切换“新增 / 编辑”两种模式（form.reset() 会清空 hidden 值，之后需回填）
+function resetFollowupForm(mode){
+    var form=document.getElementById('followupForm');
+    form.reset();
+    document.getElementById('fuRemove').checked=false;
+    document.getElementById('fuRemoveWrap').style.display='none';
+    document.getElementById('fuCurrentAttach').innerHTML='';
+    document.getElementById('fuModalTitle').textContent = mode==='edit' ? '编辑跟进' : '添加跟进';
+    document.getElementById('fuSubmitBtn').textContent = mode==='edit' ? '保存修改' : '保存跟进';
+    return form;
+}
 function showFollowupModal(cid,cname){
+    resetFollowupForm('add');
+    document.getElementById('fuId').value='';
     document.getElementById('fuCustomerId').value=cid;
     document.getElementById('fuCustomerName').textContent=cname;
-    document.getElementById('followupForm').reset();
     openModal('followupModal');
+}
+// 编辑已有跟进记录（需 crm_followup_edit 权限）
+function editFollowup(id){
+    if(!CAN_EDIT_FOLLOWUP){ alert('无权限：仅管理员或被授权角色可修改跟进记录'); return; }
+    fetch('ajax.php?action=get_followup_detail&id='+id)
+    .then(function(r){
+        if(!r.ok) throw new Error('HTTP '+r.status);
+        var ct = r.headers.get('content-type')||'';
+        if(ct.indexOf('application/json')===-1) throw new Error('非JSON响应');
+        return r.json();
+    })
+    .then(function(resp){
+        if(!resp.success || !resp.data){ alert(resp.message||'加载失败'); return; }
+        var f=resp.data;
+        var form=resetFollowupForm('edit');
+        document.getElementById('fuId').value=f.id;
+        document.getElementById('fuCustomerId').value=f.customer_id;
+        document.getElementById('fuCustomerName').textContent=f.customer_name||'';
+        form.querySelector('[name=follow_type]').value=f.follow_type||'电话';
+        form.querySelector('[name=result]').value=f.result||'待跟进';
+        form.querySelector('[name=content]').value=f.content||'';
+        form.querySelector('[name=next_follow_at]').value=f.next_follow_at?String(f.next_follow_at).substring(0,10):'';
+        var cur=document.getElementById('fuCurrentAttach');
+        if(f.attachment){
+            cur.innerHTML='当前附件：<a href="../../'+escHtml(f.attachment)+'" target="_blank" download="'+escHtml(f.attachment_name||'')+'">📎 '+escHtml(f.attachment_name||'查看附件')+'</a>';
+            document.getElementById('fuRemoveWrap').style.display='block';
+        }else{
+            cur.innerHTML='当前无附件';
+        }
+        openModal('followupModal');
+    })
+    .catch(function(err){ alert('加载失败：'+err.message); });
 }
 function saveFollowup(e){
     e.preventDefault();
-    var fd=new FormData(document.getElementById('followupForm'));
-    fd.append('action','add_followup');
-    var btn = document.querySelector('#followupModal button[type=submit]');
+    var form=document.getElementById('followupForm');
+    var editId=document.getElementById('fuId').value;
+    var fileInput=form.querySelector('input[type=file][name=attachment]');
+    if(fileInput && fileInput.files && fileInput.files[0] && fileInput.files[0].size > 50*1024*1024){
+        alert('附件大小超过 50MB 上限，请压缩后再上传');
+        return false;
+    }
+    var fd=new FormData(form);
+    fd.append('action', editId ? 'update_followup' : 'add_followup');
+    if(editId && document.getElementById('fuRemove').checked) fd.append('remove_attachment','1');
+    var btn = document.getElementById('fuSubmitBtn');
     if(btn){btn.disabled=true;btn.textContent='保存中...';}
     fetch('ajax.php',{method:'POST',body:fd})
     .then(function(r){
@@ -325,7 +403,7 @@ function saveFollowup(e){
         alert('跟进保存失败：'+err.message);
     })
     .finally(function(){
-        if(btn){btn.disabled=false;btn.textContent='保存跟进';}
+        if(btn){btn.disabled=false;btn.textContent = editId ? '保存修改' : '保存跟进';}
     });
     return false;
 }

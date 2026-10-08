@@ -6,8 +6,12 @@
 require_once __DIR__ . '/../../includes/header.php';
 require_permission('crm_followup_view');
 $pdo = getDB();
+require_once __DIR__ . '/../../includes/migration.php';
+run_migrations();
 $isAdmin = (get_user_role() === 'admin');
 $userId = get_user_id();
+// 是否有编辑跟进记录的权限（管理员恒为 true，其他角色需在「系统管理-角色权限」中勾选 crm_followup_edit）
+$canEditFollowup = check_permission('crm_followup_edit');
 
 $tab = $_GET['tab'] ?? 'all';
 $page = max(1, intval($_GET['page'] ?? 1));
@@ -49,10 +53,11 @@ $total = $countStmt->fetchColumn();
 $pages = ceil($total / $perPage);
 
 $sql = "SELECT f.*, c.name as customer_name, c.phone as customer_phone, c.in_pool, IFNULL(c.intended_product,'') as intended_product,
-    u.real_name as user_name
+    u.real_name as user_name, ue.real_name as updated_by_name
     FROM customer_followups f
     LEFT JOIN customers c ON f.customer_id=c.id
     LEFT JOIN users u ON f.user_id=u.id
+    LEFT JOIN users ue ON f.updated_by=ue.id
     WHERE 1=1 $where
     ORDER BY f.created_at DESC LIMIT $offset,$perPage";
 $stmt = $pdo->prepare($sql);
@@ -133,14 +138,21 @@ $tabDoneCount = $countDone->fetchColumn();
     <td><?=htmlspecialchars($f['customer_phone'])?:'-'?></td>
     <td><?php $prod=$f['intended_product']??''; if($prod): ?><span title="<?=htmlspecialchars($prod)?>" style="cursor:help;"><?=htmlspecialchars(mb_strlen($prod)>8?mb_substr($prod,0,8).'...':$prod)?></span><?php else: ?>-<?php endif; ?></td>
     <td><span class="badge badge-<?=$badgeColors[$f['follow_type']]??'gray'?>"><?=htmlspecialchars($f['follow_type'])?></span></td>
-    <td style="max-width:300px;word-break:break-all;"><?=htmlspecialchars(mb_substr($f['content']??'',0,80))?><?=mb_strlen($f['content']??'')>80?'...':''?></td>
+    <td style="max-width:300px;word-break:break-all;" title="<?=htmlspecialchars($f['content']??'')?>"><?=htmlspecialchars(mb_substr($f['content']??'',0,26))?><?=mb_strlen($f['content']??'')>26?'...':''?>
+    <?php if (!empty($f['updated_by'])): ?>
+    <div style="font-size:11px;color:var(--gray-400);margin-top:2px;"><i class="fa-solid fa-pen"></i> <?=htmlspecialchars($f['updated_by_name'] ?: ('用户#'.$f['updated_by']))?> 修改于 <?=date('m-d H:i',strtotime($f['updated_at']))?></div>
+    <?php endif; ?>
+    </td>
     <td><span class="badge badge-<?=$resultLabels[$f['result']]??'gray'?>"><?=$f['result']?></span></td>
     <td><?=htmlspecialchars($f['user_name'])?:'-'?></td>
     <td><?=$f['next_follow_at']?date('Y-m-d',strtotime($f['next_follow_at'])):'-'?></td>
-    <td><?php if ($f['attachment']): ?><a href="../../<?=htmlspecialchars($f['attachment'])?>" target="_blank" title="查看附件">📎</a><?php else: ?>-<?php endif; ?></td>
+    <td><?php if ($f['attachment']): $an = $f['attachment_name'] ?? ''; ?><a href="../../<?=htmlspecialchars($f['attachment'])?>" target="_blank" download="<?=htmlspecialchars($an)?>" title="<?=htmlspecialchars($an ?: '查看附件')?>">📎 <?=htmlspecialchars($an ? (mb_strlen($an) > 12 ? mb_substr($an, 0, 12) . '...' : $an) : '附件')?></a><?php else: ?>-<?php endif; ?></td>
     <td><?=date('m-d H:i',strtotime($f['created_at']))?></td>
     <td>
         <button class="btn btn-sm btn-outline" onclick="viewFollowup(<?=$f['id']?>)" title="查看详情"><i class="fa-solid fa-eye"></i></button>
+        <?php if ($canEditFollowup): ?>
+        <button class="btn btn-sm btn-primary" onclick="editFollowup(<?=$f['id']?>)" title="编辑"><i class="fa-solid fa-pen"></i></button>
+        <?php endif; ?>
         <?php if ($isAdmin || intval($f['user_id']) === $userId): ?>
         <button class="btn btn-sm btn-danger" onclick="delFollowup(<?=$f['id']?>)" title="删除"><i class="fa-solid fa-trash"></i></button>
         <?php endif; ?>
@@ -159,8 +171,73 @@ $tabDoneCount = $countDone->fetchColumn();
 <!-- 查看跟进详情弹窗 -->
 <div class="modal-overlay" id="viewFollowupModal"><div class="modal modal-md"><div class="modal-header"><h3 class="modal-title">跟进详情</h3><button class="modal-close" onclick="closeModal('viewFollowupModal')">&times;</button></div>
 <div class="modal-body" id="fuDetailContent"></div>
-<div class="modal-footer"><button type="button" class="btn btn-outline" onclick="closeModal('viewFollowupModal')">关闭</button></div>
+<div class="modal-footer">
+    <button type="button" class="btn btn-outline" onclick="closeModal('viewFollowupModal')">关闭</button>
+    <?php if ($canEditFollowup): ?>
+    <button type="button" class="btn btn-primary" id="fuDetailEditBtn" onclick="editFollowup(document.getElementById('fuDetailId').value)"><i class="fa-solid fa-pen"></i> 编辑</button>
+    <?php endif; ?>
+</div>
+<input type="hidden" id="fuDetailId" value="">
 </div></div>
+
+<!-- 编辑跟进弹窗（需 crm_followup_edit 权限） -->
+<?php if ($canEditFollowup): ?>
+<div class="modal-overlay" id="editFollowupModal">
+<div class="modal modal-md">
+<form id="editFollowupForm" onsubmit="return saveFollowupEdit(event)" enctype="multipart/form-data">
+<?= csrf_field() ?>
+<input type="hidden" name="id" id="efId">
+    <div class="modal-header">
+        <h3 class="modal-title">编辑跟进 - <span id="efCustomerName"></span></h3>
+        <button type="button" class="modal-close" onclick="closeModal('editFollowupModal')">&times;</button>
+    </div>
+    <div class="modal-body">
+        <div class="form-row">
+            <div class="form-group">
+                <label class="form-label">跟进类型</label>
+                <select name="follow_type" id="efType" class="form-control">
+                <?php foreach (['电话','微信','面谈','拜访','短信','邮件','其他'] as $t): ?>
+                    <option value="<?=$t?>"><?=$t?></option>
+                <?php endforeach; ?>
+                </select>
+            </div>
+            <div class="form-group">
+                <label class="form-label">跟进结果</label>
+                <select name="result" id="efResult" class="form-control">
+                <?php foreach (['待跟进','有意向','已成交','无意向'] as $r): ?>
+                    <option value="<?=$r?>"><?=$r?></option>
+                <?php endforeach; ?>
+                </select>
+            </div>
+        </div>
+        <div class="form-group">
+            <label class="form-label">跟进内容 <span style="color:var(--danger)">*</span></label>
+            <textarea name="content" id="efContent" class="form-control" rows="4" required placeholder="请输入跟进内容"></textarea>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label class="form-label">计划下次跟进</label>
+                <input type="date" name="next_follow_at" id="efNext" class="form-control">
+            </div>
+            <div class="form-group">
+                <label class="form-label">附件（留空则不替换）</label>
+                <input type="file" name="attachment" id="efAttachment" class="form-control">
+                <div id="efCurrentAttach" style="font-size:12px;color:var(--gray-500);margin-top:4px;"></div>
+                <label id="efRemoveWrap" style="display:none;font-size:12px;margin-top:4px;cursor:pointer;color:var(--danger);">
+                    <input type="checkbox" id="efRemove"> 删除当前附件
+                </label>
+            </div>
+        </div>
+        <div style="font-size:12px;color:var(--gray-400);">提示：跟进人与记录时间不可修改，改动会记录最后修改人。</div>
+    </div>
+    <div class="modal-footer">
+        <button type="button" class="btn btn-outline" onclick="closeModal('editFollowupModal')">取消</button>
+        <button type="submit" class="btn btn-primary" id="efSaveBtn"><i class="fa-solid fa-check"></i> 保存修改</button>
+    </div>
+</form>
+</div>
+</div>
+<?php endif; ?>
 
 <script>
 var CSRF_TOKEN = <?= json_encode($_SESSION['csrf_token'] ?? '') ?>;
@@ -183,9 +260,11 @@ function viewFollowup(id){
             html += '<tr><td style="color:var(--gray-500);">跟进时间</td><td>'+escHtml(f.created_at||'')+'</td></tr>';
             html += '<tr><td style="color:var(--gray-500);">计划下次</td><td>'+escHtml(f.next_follow_at||'无')+'</td></tr>';
             html += '<tr><td style="color:var(--gray-500);">跟进内容</td><td style="white-space:pre-wrap;">'+escHtml(f.content||'')+'</td></tr>';
-            if(f.attachment){html += '<tr><td style="color:var(--gray-500);">附件</td><td><a href="../../'+escHtml(f.attachment)+'" target="_blank">查看附件</a></td></tr>';}
+            if(f.attachment){html += '<tr><td style="color:var(--gray-500);">附件</td><td><a href="../../'+escHtml(f.attachment)+'" target="_blank" download="'+escHtml(f.attachment_name||'')+'" title="'+escHtml(f.attachment_name||'')+'">📎 '+escHtml(f.attachment_name||'查看附件')+'</a></td></tr>';}
             html += '</table>';
             document.getElementById('fuDetailContent').innerHTML=html;
+            var hid = document.getElementById('fuDetailId');
+            if(hid) hid.value = f.id;
         } else {
             document.getElementById('fuDetailContent').innerHTML='<p style="text-align:center;padding:20px;color:var(--gray-500);">'+(resp.message||'加载失败')+'</p>';
         }
@@ -216,6 +295,70 @@ function delFollowup(id){
     .catch(function(err){
         alert('删除失败：'+err.message);
     });
+}
+// ===== 编辑跟进记录 =====
+function fetchFollowup(id){
+    return fetch('ajax.php?action=get_followup_detail&id='+id)
+    .then(function(r){
+        if(!r.ok) throw new Error('HTTP '+r.status);
+        var ct = r.headers.get('content-type')||'';
+        if(ct.indexOf('application/json')===-1) throw new Error('服务端返回异常');
+        return r.json();
+    });
+}
+function editFollowup(id){
+    if(!id) return;
+    fetchFollowup(id).then(function(resp){
+        if(!resp.success || !resp.data){ alert(resp.message||'加载失败'); return; }
+        var f = resp.data;
+        document.getElementById('efId').value = f.id;
+        document.getElementById('efCustomerName').textContent = f.customer_name || '';
+        document.getElementById('efType').value = f.follow_type || '电话';
+        document.getElementById('efResult').value = f.result || '待跟进';
+        document.getElementById('efContent').value = f.content || '';
+        document.getElementById('efNext').value = f.next_follow_at ? String(f.next_follow_at).substring(0,10) : '';
+        document.getElementById('efAttachment').value = '';
+        var rm = document.getElementById('efRemove'); rm.checked = false;
+        var rmWrap = document.getElementById('efRemoveWrap');
+        var cur = document.getElementById('efCurrentAttach');
+        if(f.attachment){
+            var nm = f.attachment_name || '查看附件';
+            cur.innerHTML = '当前：<a href="../../'+escHtml(f.attachment)+'" target="_blank" download="'+escHtml(f.attachment_name||'')+'">📎 '+escHtml(nm)+'</a>';
+            rmWrap.style.display = 'block';
+        } else {
+            cur.innerHTML = '当前：无附件';
+            rmWrap.style.display = 'none';
+        }
+        closeModal('viewFollowupModal');
+        openModal('editFollowupModal');
+    }).catch(function(err){ alert('加载失败：'+err.message); });
+}
+function saveFollowupEdit(e){
+    e.preventDefault();
+    var btn = document.getElementById('efSaveBtn');
+    var old = btn ? btn.innerHTML : '';
+    if(btn){ btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> 保存中...'; }
+    var fd = new FormData(document.getElementById('editFollowupForm'));
+    fd.append('action','update_followup');
+    fd.append('_csrf_token', CSRF_TOKEN);
+    if(document.getElementById('efRemove').checked) fd.append('remove_attachment','1');
+    fetch('ajax.php',{method:'POST',body:fd})
+    .then(function(r){
+        if(!r.ok) throw new Error('HTTP '+r.status);
+        var ct = r.headers.get('content-type')||'';
+        if(ct.indexOf('application/json')===-1) throw new Error('服务端返回异常');
+        return r.json();
+    })
+    .then(function(resp){
+        if(btn){ btn.disabled = false; btn.innerHTML = old; }
+        if(resp.success){ alert(resp.message||'已保存'); location.reload(); }
+        else alert(resp.message||'保存失败');
+    })
+    .catch(function(err){
+        if(btn){ btn.disabled = false; btn.innerHTML = old; }
+        alert('保存失败：'+err.message);
+    });
+    return false;
 }
 function escHtml(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 </script>

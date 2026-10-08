@@ -4,9 +4,15 @@
  * 处理：查重、快速跟进、认领、归池、关联订单、附件上传
  */
 require_once __DIR__ . '/../../includes/api_init.php';
+require_once __DIR__ . '/../../includes/migration.php';
 
 $pdo = getDB();
 $action = $_GET['action'] ?? ($_POST['action'] ?? '');
+
+// CRM 跟进附件允许的扩展名（图片 / 文档 / 演示文稿 / 压缩包）
+const CRM_ATTACHMENT_EXT = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'pdf', 'zip', 'rar'];
+// CRM 跟进附件大小上限：50MB
+const CRM_ATTACHMENT_MAX_SIZE = 52428800;
 
 header('Content-Type: application/json; charset=utf-8');
 
@@ -14,11 +20,20 @@ header('Content-Type: application/json; charset=utf-8');
 function csrf_check() {
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') return;
     $token = $_POST['_csrf_token'] ?? '';
-    if (empty($_SESSION['csrf_token']) || !hash_equals($_SESSION['csrf_token'], $token)) {
-        $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
-        json_response(false, '安全验证失败，请刷新页面后重试');
+    if (!csrf_is_valid($token)) {
+        csrf_regenerate();
+        // 下发新令牌，前端刷新后可重试（页面脚本里的 CSRF_TOKEN 常量由 main.js 自动更新）
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode([
+            'success' => false,
+            'message' => '页面已过期（安全验证失败），请刷新页面后重试',
+            'csrf_expired' => true,
+            'csrf_token' => $_SESSION['csrf_token'],
+        ], JSON_UNESCAPED_UNICODE);
+        exit;
     }
-    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+    // 校验通过后不再轮换令牌：轮换会让同一会话其它页面（尤其是把令牌写死在 JS 常量里的页面）
+    // 的令牌立刻失效，导致后续所有提交都报“安全验证失败”
 }
 
 // ========== 电话查重 ==========
@@ -34,6 +49,7 @@ if ($action === 'check_phone') {
 // ========== 快速添加跟进 ==========
 if ($action === 'add_followup') {
     csrf_check();
+    run_migrations(); // 确保 attachment_name 字段已存在
     $customerId = intval($_POST['customer_id'] ?? 0);
     $content = trim($_POST['content'] ?? '');
     $followType = $_POST['follow_type'] ?? '电话';
@@ -43,18 +59,102 @@ if ($action === 'add_followup') {
     if (!$customerId) json_response(false, '缺少客户ID');
     if (!$content) json_response(false, '请填写跟进内容');
 
-    // 处理附件
+    // 处理附件：任何失败都要把原因告知用户，不能静默丢弃
     $attachment = '';
-    if (!empty($_FILES['attachment']) && $_FILES['attachment']['error'] === UPLOAD_ERR_OK) {
-        $res = upload_file('attachment', ['pdf','doc','docx','xls','xlsx','jpg','jpeg','png','gif','zip','rar']);
-        if ($res['success']) $attachment = $res['path'];
+    $attachmentName = '';
+    $attachError = '';
+    if (!empty($_FILES['attachment']) && ($_FILES['attachment']['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_NO_FILE) {
+        $errCode = intval($_FILES['attachment']['error']);
+        if ($errCode !== UPLOAD_ERR_OK) {
+            $attachError = '文件上传出错（错误码 ' . $errCode . '），通常是文件超过服务器 upload_max_filesize 限制';
+        } else {
+            $res = upload_file('attachment', CRM_ATTACHMENT_EXT, CRM_ATTACHMENT_MAX_SIZE);
+            if ($res['success']) {
+                $attachment = $res['path'];
+                $attachmentName = $res['original_name'] ?? '';
+            } else {
+                $attachError = $res['message'];
+            }
+        }
     }
 
-    $pdo->prepare("INSERT INTO customer_followups (customer_id,user_id,follow_type,content,attachment,next_follow_at,result,created_at) VALUES (?,?,?,?,?,?,?,NOW())")
-        ->execute([$customerId, $userId, $followType, $content, $attachment, $nextFollow ?: null, $result]);
+    $pdo->prepare("INSERT INTO customer_followups (customer_id,user_id,follow_type,content,attachment,attachment_name,next_follow_at,result,created_at) VALUES (?,?,?,?,?,?,?,?,NOW())")
+        ->execute([$customerId, $userId, $followType, $content, $attachment, $attachmentName, $nextFollow ?: null, $result]);
     $pdo->prepare("UPDATE customers SET last_followed_at=NOW() WHERE id=?")->execute([$customerId]);
     add_log($userId, 'followup', 'crm', "添加跟进: customer_id={$customerId}");
+
+    if ($attachError) {
+        json_response(true, '跟进已添加，但附件上传失败：' . $attachError);
+    }
     json_response(true, '跟进已添加');
+}
+
+// ========== 修改跟进记录（需 crm_followup_edit 权限，如管理员）==========
+if ($action === 'update_followup') {
+    csrf_check();
+    run_migrations(); // 确保 updated_at / updated_by 字段已存在
+    if (!check_permission('crm_followup_edit')) json_response(false, '无权限：仅管理员或被授权角色可修改跟进记录');
+
+    $id = intval($_POST['id'] ?? 0);
+    $content = trim($_POST['content'] ?? '');
+    $followType = $_POST['follow_type'] ?? '电话';
+    $result = $_POST['result'] ?? '待跟进';
+    $nextFollow = $_POST['next_follow_at'] ?? null;
+    $removeAttachment = intval($_POST['remove_attachment'] ?? 0) === 1;
+    $userId = get_user_id();
+
+    if (!$id) json_response(false, '缺少记录ID');
+    if (!$content) json_response(false, '请填写跟进内容');
+
+    $stmt = $pdo->prepare("SELECT * FROM customer_followups WHERE id=?");
+    $stmt->execute([$id]);
+    $fw = $stmt->fetch();
+    if (!$fw) json_response(false, '记录不存在');
+
+    // 白名单校验：follow_type / result 是 ENUM，写入非法值会被截断，这里回退为原值
+    $allowTypes = ['电话', '微信', '面谈', '拜访', '短信', '邮件', '其他'];
+    $allowResults = ['待跟进', '有意向', '已成交', '无意向'];
+    if (!in_array($followType, $allowTypes, true)) $followType = $fw['follow_type'];
+    if (!in_array($result, $allowResults, true)) $result = $fw['result'];
+
+    $attachment = $fw['attachment'] ?: '';
+    $attachmentName = $fw['attachment_name'] ?: '';
+    $attachError = '';
+
+    // 勾选了“删除当前附件”
+    if ($removeAttachment && $attachment) {
+        @unlink(__DIR__ . '/../../' . $attachment);
+        $attachment = '';
+        $attachmentName = '';
+    }
+
+    // 上传新附件（覆盖旧的）
+    if (!empty($_FILES['attachment']) && ($_FILES['attachment']['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_NO_FILE) {
+        $errCode = intval($_FILES['attachment']['error']);
+        if ($errCode !== UPLOAD_ERR_OK) {
+            $attachError = '文件上传出错（错误码 ' . $errCode . '），通常是文件超过服务器 upload_max_filesize 限制';
+        } else {
+            $res = upload_file('attachment', CRM_ATTACHMENT_EXT, CRM_ATTACHMENT_MAX_SIZE);
+            if ($res['success']) {
+                if ($attachment) @unlink(__DIR__ . '/../../' . $attachment);
+                $attachment = $res['path'];
+                $attachmentName = $res['original_name'] ?? '';
+            } else {
+                $attachError = $res['message'];
+            }
+        }
+    }
+
+    // 不改 user_id / created_at：保留原始跟进人与记录时间，避免归属和统计混乱
+    $pdo->prepare("UPDATE customer_followups SET follow_type=?, content=?, attachment=?, attachment_name=?, next_follow_at=?, result=?, updated_at=NOW(), updated_by=? WHERE id=?")
+        ->execute([$followType, $content, $attachment, $attachmentName, $nextFollow ?: null, $result, $userId, $id]);
+
+    add_log($userId, 'edit_followup', 'crm', "修改跟进: id={$id}, customer_id={$fw['customer_id']}");
+
+    if ($attachError) {
+        json_response(true, '跟进已更新，但附件上传失败：' . $attachError);
+    }
+    json_response(true, '跟进已更新');
 }
 
 // ========== 认领客户 ==========
@@ -124,9 +224,14 @@ if ($action === 'assign') {
         ->execute([$customerId, $oldOwner, $toUserId, 'assign', get_user_id()]);
 
     // 同步更新进行中的报价单业务员（draft/quoted 转移，withdrawn 不转）
-    $stmtQ = $pdo->prepare("UPDATE sales_quotes SET employee_id=? WHERE customer_id=? AND status IN ('draft','quoted')");
+    $stmtQ = $pdo->prepare("UPDATE sales_quotes SET employee_id=? WHERE customer_id=? AND status IN ('draft','quoted','contracted')");
     $stmtQ->execute([$toUserId, $customerId]);
     $quotesCount = $stmtQ->rowCount();
+
+    // 同步更新该客户未终结的销售合同业务员（已完成/已终止的合同不参与转移）
+    $stmtC = $pdo->prepare("UPDATE sales_contracts SET employee_id=? WHERE customer_id=? AND status IN ('draft','confirmed','executing')");
+    $stmtC->execute([$toUserId, $customerId]);
+    $contractsCount = $stmtC->rowCount();
 
     // 同步更新进行中的销售订单业务员（draft/confirmed 转移，已完结不转）
     $stmtO = $pdo->prepare("UPDATE sales_orders SET employee_id=? WHERE customer_id=? AND status IN ('draft','confirmed')");
@@ -169,9 +274,14 @@ if ($action === 'transfer') {
         ->execute([$customerId, $oldOwner, $toUserId, 'transfer', $userId]);
 
     // 同步更新进行中的报价单业务员（draft/quotated 转移，withdrawn 不转）
-    $stmtQ = $pdo->prepare("UPDATE sales_quotes SET employee_id=? WHERE customer_id=? AND status IN ('draft','quoted')");
+    $stmtQ = $pdo->prepare("UPDATE sales_quotes SET employee_id=? WHERE customer_id=? AND status IN ('draft','quoted','contracted')");
     $stmtQ->execute([$toUserId, $customerId]);
     $quotesCount = $stmtQ->rowCount();
+
+    // 同步更新该客户未终结的销售合同业务员（已完成/已终止的合同不参与转移）
+    $stmtC = $pdo->prepare("UPDATE sales_contracts SET employee_id=? WHERE customer_id=? AND status IN ('draft','confirmed','executing')");
+    $stmtC->execute([$toUserId, $customerId]);
+    $contractsCount = $stmtC->rowCount();
 
     // 同步更新进行中的销售订单业务员（draft/confirmed 转移，已完结不转）
     $stmtO = $pdo->prepare("UPDATE sales_orders SET employee_id=? WHERE customer_id=? AND status IN ('draft','confirmed')");
@@ -267,8 +377,11 @@ if ($action === 'delete_followup') {
 }
 
 // ========== 批量删除客户 ==========
+// 删除的是客户主数据。原先只认主数据的 customer_edit，与同页新增/编辑用的 crm_customer_edit
+// 不是一套，统一为「两者有其一即可」——既对齐语义，也不会让原本有权限的人突然删不动
 if ($action === 'batch_delete') {
     csrf_check();
+    if (!check_permission('crm_customer_edit') && !check_permission('customer_edit')) json_response(false, '无权限：仅管理员或被授权角色可删除客户');
     $ids = $_POST['ids'] ?? '';
     if (!$ids) json_response(false, '请选择客户');
     $idArr = array_map('intval', explode(',', $ids));
@@ -290,9 +403,14 @@ if ($action === 'batch_delete_followup') {
 
 // ========== 附件上传 ==========
 if ($action === 'upload_attachment') {
-    $res = upload_file('file', ['pdf','doc','docx','xls','xlsx','jpg','jpeg','png','gif','zip','rar']);
+    csrf_check();
+    $res = upload_file('file', CRM_ATTACHMENT_EXT, CRM_ATTACHMENT_MAX_SIZE);
     if ($res['success']) {
-        json_response(true, '', ['path' => $res['path'], 'filename' => $res['filename']]);
+        json_response(true, '', [
+            'path' => $res['path'],
+            'filename' => $res['filename'],
+            'original_name' => $res['original_name'] ?? ''
+        ]);
     }
     json_response(false, $res['message']);
 }
@@ -301,10 +419,11 @@ if ($action === 'upload_attachment') {
 if ($action === 'get_followup_detail') {
     $id = intval($_GET['id'] ?? 0);
     if (!$id) json_response(false, '缺少ID');
-    $stmt = $pdo->prepare("SELECT f.*, c.name as customer_name, u.real_name as user_name 
+    $stmt = $pdo->prepare("SELECT f.*, c.name as customer_name, u.real_name as user_name, ue.real_name as updated_by_name
         FROM customer_followups f 
         LEFT JOIN customers c ON f.customer_id=c.id 
         LEFT JOIN users u ON f.user_id=u.id 
+        LEFT JOIN users ue ON f.updated_by=ue.id 
         WHERE f.id=?");
     $stmt->execute([$id]);
     $f = $stmt->fetch();

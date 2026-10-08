@@ -23,6 +23,13 @@ $tpl = $pdo->query("SELECT * FROM print_templates WHERE type='purchase_instock' 
     <h1 class="page-title"><i class="fa-solid fa-eye"></i> 采购入库单详情</h1>
     <div class="page-actions">
         <?php if ($tpl): ?><button class="btn btn-outline" onclick="printInstock()"><i class="fa-solid fa-print"></i> 打印</button><?php endif; ?>
+        <?php if ($instock['status'] === 'draft'): ?>
+        <form method="post" action="instock.php" style="display:inline" onsubmit="return confirm('⚠️ 确定删除此入库单吗？\n\n删除后不可恢复，关联订单将恢复为可入库状态。\n\n单号：<?=$instock['bill_no']?>')">
+            <?= csrf_field() ?>
+            <input type="hidden" name="action" value="delete"><input type="hidden" name="id" value="<?=$instock['id']?>">
+            <button class="btn btn-danger"><i class="fa-solid fa-trash"></i> 删除</button>
+        </form>
+        <?php endif; ?>
         <a href="instock.php" class="btn btn-outline"><i class="fa-solid fa-arrow-left"></i> 返回</a>
     </div>
 </div>

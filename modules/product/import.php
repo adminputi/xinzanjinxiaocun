@@ -65,9 +65,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['file'])) {
         if ($ext !== 'xlsx') {
             throw new Exception('仅支持 .xlsx 格式的Excel文件');
         }
-        // 校验 MIME
-        $mime = mime_content_type($_FILES['file']['tmp_name']);
-        $allowedMimes = ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/octet-stream'];
+        // 校验 MIME（xlsx 本质是 zip 包，无 fileinfo 扩展时按 zip/扩展名兜底）
+        $mime = detect_mime_type($_FILES['file']['tmp_name']);
+        $allowedMimes = [
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'application/zip', 'application/x-zip-compressed', 'application/octet-stream',
+        ];
         if (!in_array($mime, $allowedMimes)) {
             throw new Exception('文件类型不合法，请上传正确的Excel文件');
         }

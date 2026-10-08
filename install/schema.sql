@@ -180,7 +180,7 @@ CREATE TABLE IF NOT EXISTS `inventory_logs` (
     `warehouse_id` INT NOT NULL,
     `change_quantity` DECIMAL(12,2) DEFAULT 0 COMMENT '变动数量(正=入库,负=出库)',
     `current_quantity` DECIMAL(12,2) DEFAULT 0 COMMENT '变动后数量',
-    `type` ENUM('in','out','transfer_in','transfer_out','check','loss') DEFAULT 'in',
+    `type` VARCHAR(30) NOT NULL DEFAULT 'in' COMMENT 'in/out/transfer_in/transfer_out/check/loss',
     `bill_no` VARCHAR(100) DEFAULT '' COMMENT '单据编号',
     `bill_type` VARCHAR(50) DEFAULT '' COMMENT '单据类型',
     `user_id` INT DEFAULT 0,
@@ -295,8 +295,9 @@ CREATE TABLE IF NOT EXISTS `sales_quotes` (
     `bill_no` VARCHAR(100) NOT NULL UNIQUE,
     `customer_id` INT DEFAULT 0,
     `total_amount` DECIMAL(12,2) DEFAULT 0,
-    `status` ENUM('draft','quoted','withdrawn') DEFAULT 'draft',
+    `status` ENUM('draft','quoted','contracted','withdrawn') DEFAULT 'draft',
     `order_id` INT DEFAULT NULL COMMENT '关联的销售订单ID',
+    `contract_id` INT DEFAULT NULL COMMENT '转出的销售合同ID',
     `quote_date` DATE DEFAULT NULL,
     `employee_id` INT DEFAULT 0 COMMENT '业务员',
     `remark` TEXT,
@@ -336,6 +337,7 @@ CREATE TABLE IF NOT EXISTS `sales_orders` (
     `employee_id` INT DEFAULT 0 COMMENT '业务员',
     `remark` TEXT,
     `cancel_reason` VARCHAR(500) DEFAULT NULL COMMENT '取消原因',
+    `contract_id` INT DEFAULT NULL COMMENT '来源销售合同ID',
     `user_id` INT DEFAULT 0,
     `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
     `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -566,6 +568,8 @@ CREATE TABLE IF NOT EXISTS `customer_followups` (
     `next_follow_at` DATETIME DEFAULT NULL COMMENT '计划下次跟进时间',
     `result` ENUM('待跟进','有意向','已成交','无意向') DEFAULT '待跟进',
     `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` DATETIME DEFAULT NULL COMMENT '最后修改时间',
+    `updated_by` INT DEFAULT NULL COMMENT '最后修改人ID',
     INDEX `idx_customer` (`customer_id`),
     INDEX `idx_user` (`user_id`),
     INDEX `idx_next` (`next_follow_at`),
@@ -578,7 +582,7 @@ CREATE TABLE IF NOT EXISTS `customer_transfer_logs` (
     `customer_id` INT NOT NULL,
     `from_user_id` INT DEFAULT NULL COMMENT '原归属(NULL=公海)',
     `to_user_id` INT DEFAULT NULL COMMENT '新归属(NULL=公海)',
-    `action` ENUM('to_pool','claim','assign','transfer') NOT NULL,
+    `action` VARCHAR(50) NOT NULL DEFAULT '' COMMENT 'to_pool/claim/assign/transfer',
     `operator_id` INT NOT NULL COMMENT '操作人',
     `remark` VARCHAR(500) DEFAULT '',
     `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -589,7 +593,7 @@ CREATE TABLE IF NOT EXISTS `customer_transfer_logs` (
 CREATE TABLE IF NOT EXISTS `print_templates` (
     `id` INT AUTO_INCREMENT PRIMARY KEY,
     `name` VARCHAR(100) NOT NULL,
-    `type` ENUM('sales_order','sales_outstock','purchase_order','purchase_instock') DEFAULT 'sales_order',
+    `type` VARCHAR(30) NOT NULL DEFAULT 'sales_order' COMMENT '模板类型：sales_order/sales_outstock/purchase_order/purchase_instock/quote/product_catalog',
     `content` TEXT COMMENT 'HTML模板内容',
     `is_default` TINYINT DEFAULT 0,
     `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -776,3 +780,63 @@ INSERT INTO `tracking_statuses` (`name`, `sort_order`, `status`) VALUES
 ('已交货', 4, 1),
 ('待调试', 5, 1),
 ('订单完成', 6, 1);
+
+-- 销售合同表（合同不自建明细，商品明细即所关联报价单的明细，打印时作为附件渲染）
+CREATE TABLE IF NOT EXISTS `sales_contracts` (
+    `id` INT AUTO_INCREMENT PRIMARY KEY,
+    `contract_no` VARCHAR(100) NOT NULL UNIQUE COMMENT '合同编号 HT+日期+序号',
+    `customer_id` INT NOT NULL DEFAULT 0 COMMENT '甲方（客户）',
+    `quote_id` INT NOT NULL COMMENT '来源报价单，明细即附件',
+    `template_id` INT DEFAULT NULL COMMENT '使用的合同模板 print_templates.id',
+    `total_amount` DECIMAL(12,2) DEFAULT 0 COMMENT '合同总金额',
+    `payment_type` VARCHAR(30) NOT NULL DEFAULT 'full' COMMENT 'full=全款发货 deposit=定金+余款',
+    `deposit_amount` DECIMAL(12,2) DEFAULT 0 COMMENT '定金金额',
+    `balance_amount` DECIMAL(12,2) DEFAULT 0 COMMENT '尾款金额（总额-定金）',
+    `prep_days` INT NOT NULL DEFAULT 7 COMMENT '备货周期（工作日）',
+    `payment_terms` TEXT COMMENT '付款条款（按付款方式生成，可手工改）',
+    `purchase_desc` VARCHAR(500) DEFAULT '' COMMENT '采购描述（金额自动带出，可改）',
+    `delivery_place` VARCHAR(300) DEFAULT '' COMMENT '收货地点',
+    `receiver_name` VARCHAR(50) DEFAULT '' COMMENT '甲方授权接货经办人',
+    `receiver_phone` VARCHAR(30) DEFAULT '' COMMENT '接货人电话',
+    `warranty` VARCHAR(200) DEFAULT '' COMMENT '质保条款',
+    `tax_note` VARCHAR(200) DEFAULT '' COMMENT '价格说明，如不含税不含运费',
+    `bank_name` VARCHAR(200) DEFAULT '' COMMENT '乙方开户行',
+    `bank_account` VARCHAR(100) DEFAULT '' COMMENT '乙方账号号码',
+    `party_a_info` TEXT COMMENT '顶部甲方信息（默认联动客户，可改）',
+    `party_b_info` TEXT COMMENT '顶部乙方信息（默认联动公司，可改）',
+    `party_a_sign` TEXT COMMENT '甲方签章区文本（地址/联系人等合并，可换行）',
+    `party_b_sign` TEXT COMMENT '乙方签章区文本（账号/开户行等合并，可换行）',
+    `hotline` VARCHAR(50) DEFAULT '' COMMENT '技术支持热线',
+    `terms` TEXT COMMENT '其他约定',
+    `status` ENUM('draft','confirmed','executing','completed','terminated') NOT NULL DEFAULT 'draft',
+    `sign_date` DATE DEFAULT NULL COMMENT '签约日期',
+    `effective_date` DATE DEFAULT NULL COMMENT '生效日期',
+    `expiry_date` DATE DEFAULT NULL COMMENT '到期日期',
+    `attachment` VARCHAR(500) DEFAULT NULL COMMENT '盖章扫描件',
+    `employee_id` INT DEFAULT 0 COMMENT '业务员',
+    `remark` TEXT,
+    `user_id` INT DEFAULT 0,
+    `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX `idx_customer` (`customer_id`),
+    INDEX `idx_status` (`status`),
+    INDEX `idx_quote` (`quote_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='销售合同';
+
+-- 合同付款方式表
+CREATE TABLE IF NOT EXISTS `contract_payment_types` (
+    `id` INT AUTO_INCREMENT PRIMARY KEY,
+    `name` VARCHAR(100) NOT NULL COMMENT '付款方式名称',
+    `code` VARCHAR(30) NOT NULL UNIQUE COMMENT '方式代码 full/deposit',
+    `template` TEXT COMMENT '条款模板，支持 {total_amount} {deposit_amount} 等变量',
+    `need_deposit` TINYINT NOT NULL DEFAULT 0 COMMENT '是否需填定金金额',
+    `need_days` TINYINT NOT NULL DEFAULT 0 COMMENT '是否需填备货周期',
+    `sort` INT NOT NULL DEFAULT 0,
+    `status` TINYINT NOT NULL DEFAULT 1,
+    `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='合同付款方式';
+
+-- 预置付款方式
+INSERT IGNORE INTO `contract_payment_types` (`name`, `code`, `template`, `need_deposit`, `need_days`, `sort`, `status`) VALUES
+('全款发货', 'full', '甲方应支付合同全款 ¥{total_amount}（大写：{total_amount_cn}）。全款到达乙方指定账户后 {prep_days} 个工作日内备货完毕并安排发货。', 0, 1, 1, 1),
+('定金+余款', 'deposit', '合同签订后甲方支付定金 ¥{deposit_amount}（大写：{deposit_amount_cn}），乙方收款后合同生效并安排备货；发货前甲方支付合同余款 ¥{balance_amount}（大写：{balance_amount_cn}），乙方收到后安排发货。', 1, 0, 2, 1);

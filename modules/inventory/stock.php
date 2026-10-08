@@ -1,7 +1,10 @@
 <?php
 require_once __DIR__ . '/../../includes/header.php';
+require_once __DIR__ . '/../../includes/migration.php';
 require_permission('inventory_view');
 $pdo = getDB();
+// 确保 inventory.avg_cost 等新增字段已就绪
+run_migrations();
 $page = max(1, intval($_GET['page'] ?? 1));
 $search = $_GET['search'] ?? '';
 $warehouseId = intval($_GET['warehouse_id'] ?? 0);
@@ -20,7 +23,10 @@ $baseSql = "FROM products p LEFT JOIN product_categories c ON p.category_id=c.id
 if ($warehouseId) {
     $baseSql .= "JOIN inventory i ON p.id=i.product_id AND i.warehouse_id=$warehouseId ";
 } else {
-    $baseSql .= "LEFT JOIN (SELECT product_id, SUM(quantity) as quantity FROM inventory GROUP BY product_id) i ON p.id=i.product_id ";
+    // 跨仓库时按库存量加权平均成本
+    $baseSql .= "LEFT JOIN (SELECT product_id, SUM(quantity) as quantity,
+        SUM(quantity * COALESCE(avg_cost,0)) / NULLIF(SUM(quantity),0) as avg_cost
+        FROM inventory GROUP BY product_id) i ON p.id=i.product_id ";
 }
 
 $countSql = "SELECT COUNT(*) $baseSql $where";
@@ -31,7 +37,7 @@ if ($lowStock) {
     $where .= " AND COALESCE(i.quantity,0) <= p.min_stock AND p.min_stock > 0";
 }
 
-$sql = "SELECT p.*, c.name as category_name, COALESCE(i.quantity,0) as stock_qty $baseSql $where ORDER BY COALESCE(i.quantity,999999) ASC LIMIT $offset,$perPage";
+$sql = "SELECT p.*, c.name as category_name, COALESCE(i.quantity,0) as stock_qty, COALESCE(i.avg_cost,0) as avg_cost $baseSql $where ORDER BY COALESCE(i.quantity,999999) ASC LIMIT $offset,$perPage";
 $stmt = $pdo->prepare($sql); $stmt->execute($params);
 $list = $stmt->fetchAll();
 
@@ -39,7 +45,8 @@ $warehouses = get_options('warehouses','id','name','status=1');
 $categories = get_options('product_categories','id','name','status=1');
 
 // 库存总览统计
-$totalValue = $pdo->query("SELECT COALESCE(SUM(i.quantity * p.purchase_price),0) FROM inventory i JOIN products p ON i.product_id=p.id WHERE p.status=1")->fetchColumn();
+// 库存金额优先用移动加权平均成本；尚未计算成本的回退到采购价
+$totalValue = $pdo->query("SELECT COALESCE(SUM(i.quantity * CASE WHEN COALESCE(i.avg_cost,0)>0 THEN i.avg_cost ELSE p.purchase_price END),0) FROM inventory i JOIN products p ON i.product_id=p.id WHERE p.status=1")->fetchColumn();
 $lowCount = $pdo->query("SELECT COUNT(*) FROM products p LEFT JOIN (SELECT product_id, SUM(quantity) as quantity FROM inventory GROUP BY product_id) i ON p.id=i.product_id WHERE p.min_stock>0 AND p.status=1 AND COALESCE(i.quantity,0)<=p.min_stock")->fetchColumn();
 $totalTypes = $pdo->query("SELECT COUNT(DISTINCT product_id) FROM inventory WHERE quantity>0")->fetchColumn();
 ?>
@@ -68,9 +75,11 @@ $totalTypes = $pdo->query("SELECT COUNT(DISTINCT product_id) FROM inventory WHER
 
 <div class="card"><div class="card-body" style="padding:0;"><div class="table-container">
 <table class="stock-table">
-<thead><tr><th style="width:48px;">图片</th><th class="mob-hide">SKU</th><th>商品名称</th><th class="mob-hide">分类</th><th>规格</th><th class="col-stock">库存数量</th><th>采购价</th><th class="mob-hide">库存价值</th><th>最低库存</th><th>状态</th><th style="width:60px;">操作</th></tr></thead>
+<thead><tr><th style="width:48px;">图片</th><th class="mob-hide">SKU</th><th>商品名称</th><th class="mob-hide">分类</th><th>规格</th><th class="col-stock">库存数量</th><th class="mob-hide">采购价</th><th class="mob-hide">平均成本</th><th class="mob-hide">库存价值</th><th>最低库存</th><th>状态</th><th style="width:60px;">操作</th></tr></thead>
 <tbody>
-<?php if ($list): foreach ($list as $item): $stock = floatval($item['stock_qty']); $stockVal = $stock * floatval($item['purchase_price']); ?>
+<?php if ($list): foreach ($list as $item): $stock = floatval($item['stock_qty']);
+$unitCost = floatval($item['avg_cost']) > 0 ? floatval($item['avg_cost']) : floatval($item['purchase_price']);
+$stockVal = $stock * $unitCost; ?>
 <tr>
     <td>
         <?php if (!empty($item['image'])): ?>
@@ -92,14 +101,15 @@ $totalTypes = $pdo->query("SELECT COUNT(DISTINCT product_id) FROM inventory WHER
         <strong class="stock-num"><?=$stock?></strong>
         <?php endif; ?>
     </td>
-    <td data-label="单价">¥<?=format_money($item['purchase_price'])?></td>
+    <td class="mob-hide" data-label="采购价">¥<?=format_money($item['purchase_price'])?></td>
+    <td class="mob-hide" data-label="平均成本"><?= floatval($item['avg_cost'])>0 ? '¥'.format_money($item['avg_cost']) : '<span style="color:var(--gray-400)">-</span>' ?></td>
     <td class="mob-hide" data-label="库存价值">¥<?=format_money($stockVal)?></td>
     <td data-label="最低库存"><?=$item['min_stock']?:'-'?></td>
     <td data-label="状态"><?= $item['min_stock']>0&&$stock<=$item['min_stock'] ? '<span class="badge badge-danger">库存不足</span>' : ($stock>0?'<span class="badge badge-success">正常</span>':'<span class="badge badge-warning">缺货</span>') ?></td>
     <td><button class="btn btn-sm btn-outline" onclick="viewProductDetail(<?=$item['id']?>)" title="查看详情"><i class="fa-solid fa-eye"></i></button></td>
 </tr>
 <?php endforeach; else: ?>
-<tr><td colspan="11"><div class="empty-state"><i class="fa-solid fa-boxes-stacked"></i><p>暂无库存数据</p></div></td></tr>
+<tr><td colspan="12"><div class="empty-state"><i class="fa-solid fa-boxes-stacked"></i><p>暂无库存数据</p></div></td></tr>
 <?php endif; ?>
 </tbody>
 </table></div></div></div>

@@ -37,39 +37,163 @@
                 if (items) items.classList.add('open');
             }
         });
-        // 初始化AJAX导航
-        initAjaxNav();
+    });
+
+    // ============ 全局 CSRF 令牌刷新 ============
+    // 服务端在令牌失效时会下发新令牌，统一写回页面所有隐藏域
+    window.refreshCsrfToken = function(token) {
+        if (!token) return;
+        document.querySelectorAll('input[name="_csrf_token"]').forEach(function(inp) {
+            inp.value = token;
+        });
+        // CRM / 产品列表等页面把令牌写死在 JS 变量里，这里同步更新，避免刷新页面才恢复
+        if (typeof window.CSRF_TOKEN !== 'undefined') window.CSRF_TOKEN = token;
+        if (typeof window.csrfToken !== 'undefined') window.csrfToken = token;
+    };
+
+    // ============ fetch 增强：非 JSON 响应给出可读提示 ============
+    // 服务器 die()/PHP 报错/登录跳转返回的都是 HTML，前端 r.json() 只会抛出
+    // "Unexpected token '<' ..."，用户完全看不懂，这里统一换成中文提示，
+    // 并在令牌过期时自动把新令牌写回页面
+    (function enhanceFetch() {
+        if (!window.fetch) return;
+        var origFetch = window.fetch.bind(window);
+        // 仅对明确期望 JSON 的请求做包装，避免给 AJAX 导航（取 HTML）增加多余的响应副本
+        function headersWantJson(h) {
+            if (!h || typeof h !== 'object') return false;
+            var get = function(k) {
+                if (typeof h.get === 'function') return h.get(k);
+                for (var key in h) {
+                    if (String(key).toLowerCase() === k) return h[key];
+                }
+                return null;
+            };
+            var xrw = String(get('x-requested-with') || '').toLowerCase();
+            var accept = String(get('accept') || '').toLowerCase();
+            return xrw === 'xmlhttprequest' || accept.indexOf('application/json') !== -1;
+        }
+        window.fetch = function(input, init) {
+            var wantsJson = headersWantJson(init && init.headers)
+                || (typeof Request !== 'undefined' && input instanceof Request && headersWantJson(input.headers));
+            var p = origFetch.apply(null, arguments);
+            if (!wantsJson) return p;
+            return p.then(function(resp) {
+                if (!resp || typeof resp.json !== 'function' || resp.__jsonEnhanced) return resp;
+                var snapshot = null;
+                try { snapshot = resp.clone(); } catch (e) { return resp; }
+                try {
+                    Object.defineProperty(resp, '__jsonEnhanced', { value: true });
+                    Object.defineProperty(resp, 'json', {
+                        value: function() {
+                            return snapshot.text().then(function(txt) {
+                                try {
+                                    var data = JSON.parse(txt);
+                                    if (data && data.csrf_expired && data.csrf_token && window.refreshCsrfToken) {
+                                        window.refreshCsrfToken(data.csrf_token);
+                                    }
+                                    return data;
+                                } catch (e) {
+                                    var snippet = String(txt || '').replace(/\s+/g, ' ').trim().slice(0, 100);
+                                    if (/安全验证失败|页面已过期/.test(txt)) {
+                                        throw new Error('页面已过期（安全验证失败），请刷新页面后重试');
+                                    }
+                                    if (/登录|login/i.test(snippet)) {
+                                        throw new Error('登录状态已失效，请刷新页面重新登录');
+                                    }
+                                    throw new Error('服务器未返回有效数据，请刷新页面后重试'
+                                        + (snippet ? '（响应片段：' + snippet + '）' : ''));
+                                }
+                            });
+                        }
+                    });
+                } catch (e) {}
+                return resp;
+            });
+        };
+    })();
+
+    // 页面内联脚本位于 </main> 之后（在 main.js 之后），浏览器尚未执行；
+    // 由 footer.php 在本脚本加载完成后立即调用 __bootApp 执行它们，
+    // 否则首屏页面函数（printQuote 等）未定义，且初始化顺序不确定
+    var booted = false;
+    window.__bootApp = function() {
+        if (booted) return;
+        booted = true;
+        try {
+            executeScripts(document.querySelector('.content-wrapper'));
+            rebindPageForms();
+            // 初始化可搜索下拉（客户/供应商等长列表）
+            if (window.initSearchableSelects) window.initSearchableSelects();
+            // 初始化AJAX导航
+            initAjaxNav();
+        } catch (e) {
+            console.error('页面初始化失败:', e);
+        }
+    };
+
+    // 兜底：若 footer.php 未调用（如单独引入 main.js 的页面），DOM 就绪后再执行
+    document.addEventListener('DOMContentLoaded', function() {
+        if (!booted) window.__bootApp();
     });
 
     // ============ AJAX 导航系统 ============
     var isNavigating = false;
 
+    // 这些页面含表单提交后 redirect 的 PRG 逻辑（或文件下载响应），
+    // AJAX 拼接 HTML 会在跟随 302 时把内容区留空甚至卡住导航，一律整页跳转
+    var FULL_PAGE_WHITELIST = /(^|\/)([a-z0-9_]*(_form|_edit|_add|_new|_save|_print|_export|_view|login|logout))\.php(\?|$)/i;
+    var FULL_PAGE_BLOCKLIST = /(^|\/)(backup|restore|install|update|export)[a-z0-9_]*\.php(\?|$)/i;
+
+    function shouldFullLoad(url) {
+        var path = url.split('#')[0].split('?')[0];
+        return FULL_PAGE_WHITELIST.test(path) || FULL_PAGE_BLOCKLIST.test(path);
+    }
+
+    var ajaxNavInited = false;
     function initAjaxNav() {
-        // 拦截侧边栏导航链接
-        document.querySelectorAll('.sidebar-nav a.nav-item').forEach(function(link) {
-            link.addEventListener('click', function(e) {
-                // 不拦截右键/中键/修饰键
-                if (e.ctrlKey || e.metaKey || e.button !== 0) return;
-                e.preventDefault();
-                var url = link.getAttribute('href');
-                if (!url) return;
-                // 如果点击的是当前已激活的链接，不做任何事
-                if (link.classList.contains('active')) return;
-                // 移动端：点击导航链接后自动关闭侧边栏
-                if (window.innerWidth <= 1024) toggleSidebar();
-                navigateTo(url);
-            });
+        if (ajaxNavInited) return;
+        ajaxNavInited = true;
+        // 拦截侧边栏导航链接（事件委托：内容刷新后无需重新绑定）
+        document.addEventListener('click', function(e) {
+            var link = e.target.closest ? e.target.closest('.sidebar-nav a.nav-item') : null;
+            if (!link) return;
+            // 不拦截右键/中键/修饰键
+            if (e.ctrlKey || e.metaKey || e.button !== 0) return;
+            e.preventDefault();
+            var url = link.getAttribute('href');
+            if (!url) return;
+            // 如果点击的是当前已激活的链接，不做任何事
+            if (link.classList.contains('active')) return;
+            // 移动端：点击导航链接后自动关闭侧边栏
+            if (window.innerWidth <= 1024) toggleSidebar();
+            // 编辑/表单类页面：整页跳转，避免 PRG 跳转在 AJAX 下空白
+            if (link.getAttribute('data-full') === '1' || shouldFullLoad(url)) {
+                window.location = url;
+                return;
+            }
+            navigateTo(url);
         });
 
         // 监听浏览器前进/后退
         window.addEventListener('popstate', function(e) {
-            navigateTo(location.href, true);
+            var url = location.href;
+            if (shouldFullLoad(url)) { window.location.reload(); return; }
+            navigateTo(url, true);
         });
     }
 
     function navigateTo(url, isPop) {
         if (isNavigating) return;
         isNavigating = true;
+        // 安全阀：任何异常/超时都不会卡住整站导航
+        var navDone = false;
+        var finish = function() { isNavigating = false; };
+        var safety = setTimeout(function() {
+            if (navDone) return;
+            navDone = true;
+            console.warn('AJAX 导航超时，回退为整页跳转:', url);
+            window.location = url;
+        }, 8000);
 
         // 将URL转换为绝对路径：使用浏览器原生方式解析
         // 对于根相对路径(/开头)直接使用，对于其他相对路径使用锚点解析
@@ -91,8 +215,20 @@
             return response.text();
         })
         .then(function(html) {
+            if (navDone) return;
+            // 整页兜底：如果响应本身就是「跳转中」页面（服务端 redirect 未生效），直接跟随其目标
+            if (/正在跳转/.test(html) && html.length < 1200) {
+                navDone = true;
+                clearTimeout(safety);
+                var m = html.match(/location\.replace\(([^)]+)\)/);
+                var target = url;
+                if (m) { try { target = JSON.parse(m[1]); } catch (e) {} }
+                window.location = target;
+                return;
+            }
+
             var curWrapper = document.querySelector('.content-wrapper');
-            if (!curWrapper) { window.location = url; return; }
+            if (!curWrapper) { navDone = true; clearTimeout(safety); window.location = url; return; }
 
             // 统一用 DOMParser 解析
             var parser = new DOMParser();
@@ -123,8 +259,27 @@
             // 提取内容
             var newWrapper = doc.querySelector('.content-wrapper');
             if (newWrapper) {
+                // 收集原页面内联 <script>（innerHTML 不会执行脚本，需要在替换后按序重建）
+                var pendingScripts = [];
+                Array.prototype.forEach.call(newWrapper.querySelectorAll('script'), function(s) {
+                    pendingScripts.push({ text: s.textContent, src: s.getAttribute('src') });
+                    s.parentNode.removeChild(s);
+                });
                 curWrapper.innerHTML = newWrapper.innerHTML;
+                // 先重建脚本，让页面函数（printQuote 等）在回调可用后再做后续初始化
+                Array.prototype.forEach.call(pendingScripts, function(item) {
+                    var ns = document.createElement('script');
+                    if (item.src) { ns.src = item.src; ns.async = false; }
+                    else { ns.textContent = item.text; }
+                    curWrapper.appendChild(ns);
+                });
+                // 新页面内容注入后重新初始化可搜索下拉
+                if (window.initSearchableSelects) window.initSearchableSelects();
+                // 重新绑定页面级表单（各页面 script 重新执行后会自行覆盖）
+                rebindPageForms();
             } else {
+                navDone = true;
+                clearTimeout(safety);
                 window.location = url;
                 return;
             }
@@ -137,13 +292,14 @@
             // 更新侧边栏激活状态
             updateActiveNav(url);
 
-            // 执行内容中的脚本
-            executeScripts(curWrapper);
-
             // 滚动到顶部
             window.scrollTo(0, 0);
+            navDone = true;
+            clearTimeout(safety);
         })
         .catch(function() {
+            navDone = true;
+            clearTimeout(safety);
             window.location = url;
         })
         .finally(function() {
@@ -172,17 +328,41 @@
         });
     }
 
+    // 执行内容区内的内联脚本：浏览器解析到 main.js（同步脚本）时会阻塞，
+    // 页面自己的 <script> 尚未执行；innerHTML 注入的脚本同样不会自动执行，
+    // 因此统一由这里按原顺序重建脚本节点执行
     function executeScripts(container) {
+        if (!container) return;
         var scripts = container.querySelectorAll('script');
-        scripts.forEach(function(oldScript) {
+        Array.prototype.forEach.call(scripts, function(oldScript) {
             var newScript = document.createElement('script');
-            // 复制属性
             for (var i = 0; i < oldScript.attributes.length; i++) {
                 newScript.setAttribute(oldScript.attributes[i].name, oldScript.attributes[i].value);
             }
-            newScript.textContent = oldScript.textContent;
+            var src = oldScript.getAttribute('src');
+            if (src) {
+                newScript.async = false;
+                newScript.src = src;
+            } else {
+                newScript.textContent = oldScript.textContent;
+            }
             oldScript.parentNode.replaceChild(newScript, oldScript);
         });
+    }
+
+    // 重新绑定页面级表单提交（AJAX 导航后新注入的 DOM 需要重绑）
+    function rebindPageForms() {
+        try {
+            // 通用：带 data-confirm 的表单统一确认；有 onsubmit 内联属性的不处理
+            document.querySelectorAll('form[data-confirm]').forEach(function(f) {
+                if (f.__boundConfirm) return;
+                f.__boundConfirm = true;
+                f.addEventListener('submit', function(e) {
+                    if (!confirm(f.getAttribute('data-confirm'))) e.preventDefault();
+                });
+            });
+            if (typeof window.rebindPageForms === 'function') window.rebindPageForms();
+        } catch (e) { console.error('rebindPageForms error:', e); }
     }
 
     // 弹窗控制
@@ -289,12 +469,14 @@
     // Toast 消息
     window.showToast = function(message, type) {
         type = type || 'info';
+        // 兼容 'danger'（Bootstrap 风格）与 'error'
+        if (type === 'danger') type = 'error';
         const container = document.getElementById('toast-container') || createToastContainer();
         const toast = document.createElement('div');
         const icons = { success: 'fa-circle-check', error: 'fa-circle-xmark', warning: 'fa-triangle-exclamation', info: 'fa-circle-info' };
         const colors = { success: '#10b981', error: '#ef4444', warning: '#f59e0b', info: '#3b82f6' };
         toast.innerHTML = '<i class="fa-solid ' + (icons[type] || icons.info) + '"></i> ' + message;
-        toast.style.cssText = 'background:white;color:#333;padding:10px 16px;border-radius:8px;margin-bottom:8px;box-shadow:0 4px 12px rgba(0,0,0,0.15);font-size:13px;display:flex;align-items:center;gap:8px;animation:slideIn 0.3s ease;border-left:3px solid ' + (colors[type] || colors.info) + ';';
+        toast.style.cssText = 'background:white;color:#333;padding:10px 16px;border-radius:8px;margin-bottom:8px;box-shadow:0 4px 12px rgba(0,0,0,0.15);font-size:13px;display:flex;align-items:center;gap:8px;position:relative;z-index:100000;animation:slideIn 0.3s ease;border-left:3px solid ' + (colors[type] || colors.info) + ';';
         container.appendChild(toast);
         setTimeout(function() {
             toast.style.opacity = '0';
@@ -398,4 +580,155 @@
         }
     });
 
+    // ============ 可搜索下拉选择器 ============
+    // 用法：给 <select> 加 class="searchable" 即升级为「输入关键字过滤」的选择器；
+    // 数据量大的可加 data-ajax="/api/search_partners.php?type=customer" 走远程搜索。
+    var SEARCHABLE_STYLE_ID = 'searchable-style';
+
+    function ensureSearchableStyle() {
+        if (document.getElementById(SEARCHABLE_STYLE_ID)) return;
+        var style = document.createElement('style');
+        style.id = SEARCHABLE_STYLE_ID;
+        style.textContent =
+            '.searchable-wrapper{position:relative;}' +
+            '.searchable-list{position:absolute;z-index:1200;left:0;right:0;top:100%;margin-top:2px;' +
+            'max-height:260px;overflow-y:auto;background:#fff;border:1px solid #d0d5dd;border-radius:6px;' +
+            'box-shadow:0 6px 18px rgba(0,0,0,.12);}' +
+            '.searchable-item{padding:7px 10px;cursor:pointer;font-size:13px;display:flex;justify-content:space-between;gap:8px;}' +
+            '.searchable-item:hover,.searchable-item.active{background:#e8f0fe;}' +
+            '.searchable-item small{color:#667085;}' +
+            '.searchable-empty{padding:8px 10px;color:#667085;cursor:default;}';
+        document.head.appendChild(style);
+    }
+
+    function ajaxSearchOptions(sel, q, cb) {
+        var base = sel.getAttribute('data-ajax') || '';
+        if (!base) return;
+        var url = base + (base.indexOf('?') >= 0 ? '&' : '?') + 'q=' + encodeURIComponent(q);
+        fetch(url).then(function(r) { return r.json(); }).then(function(data) {
+            cb((data || []).map(function(d) {
+                return { value: String(d.id), text: d.name || '', sub: d.sub || '' };
+            }));
+        }).catch(function(e) { console.error('搜索失败:', e); });
+    }
+
+    function buildSearchable(sel) {
+        ensureSearchableStyle();
+        var wrapper = document.createElement('div');
+        wrapper.className = 'searchable-wrapper';
+        var input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'form-control';
+        input.autocomplete = 'off';
+        input.placeholder = sel.getAttribute('data-placeholder') || '输入关键字搜索…';
+        var list = document.createElement('div');
+        list.className = 'searchable-list';
+        list.style.display = 'none';
+
+        // 原 select 保留在 wrapper 内并隐藏，表单提交仍以 select 的值为准
+        sel.parentNode.insertBefore(wrapper, sel);
+        wrapper.appendChild(input);
+        wrapper.appendChild(list);
+        sel.style.display = 'none';
+        wrapper.appendChild(sel);
+
+        var options = [];
+        function loadOptions() {
+            options = Array.prototype.map.call(sel.options, function(o) {
+                return { value: o.value, text: o.textContent, sub: o.getAttribute('data-sub') || '' };
+            });
+        }
+        loadOptions();
+
+        function render(q) {
+            q = (q || '').toLowerCase();
+            list.innerHTML = '';
+            var matched = options.filter(function(o) {
+                return o.value !== '' && (q === '' ||
+                    o.text.toLowerCase().indexOf(q) >= 0 ||
+                    o.sub.toLowerCase().indexOf(q) >= 0);
+            });
+            if (!matched.length) {
+                var empty = document.createElement('div');
+                empty.className = 'searchable-item searchable-empty';
+                empty.textContent = '无匹配结果';
+                list.appendChild(empty);
+                list.style.display = 'block';
+                return;
+            }
+            matched.slice(0, 200).forEach(function(o) {
+                var item = document.createElement('div');
+                item.className = 'searchable-item';
+                item.setAttribute('data-value', o.value);
+                var main = document.createElement('span');
+                main.textContent = o.text;
+                item.appendChild(main);
+                if (o.sub) {
+                    var sub = document.createElement('small');
+                    sub.textContent = o.sub;
+                    item.appendChild(sub);
+                }
+                item.addEventListener('mousedown', function(e) { e.preventDefault(); pick(o); });
+                list.appendChild(item);
+            });
+            list.style.display = 'block';
+        }
+
+        function pick(o) {
+            // 远程结果可能不在原 select 中，补一个 option 才能正常提交
+            var exists = Array.prototype.some.call(sel.options, function(op) { return op.value === o.value; });
+            if (!exists) {
+                var op = document.createElement('option');
+                op.value = o.value;
+                op.textContent = o.text;
+                sel.appendChild(op);
+                loadOptions();
+            }
+            sel.value = o.value;
+            input.value = o.text;
+            list.style.display = 'none';
+            sel.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+
+        // 外部 JS 直接改 select 值（如重置表单）时同步输入框显示
+        sel.addEventListener('change', function() {
+            var cur = sel.options[sel.selectedIndex];
+            input.value = (cur && cur.value) ? cur.textContent : '';
+        });
+
+        input.addEventListener('focus', function() { render(input.value); });
+        input.addEventListener('input', function() {
+            var q = input.value;
+            if (sel.getAttribute('data-ajax')) {
+                clearTimeout(input.__timer);
+                input.__timer = setTimeout(function() {
+                    ajaxSearchOptions(sel, q, function(items) { options = items; render(q); });
+                }, 250);
+            } else {
+                render(q);
+            }
+        });
+        input.addEventListener('blur', function() {
+            // 只输入不选时回退显示已选值，避免界面显示与实际提交值不一致
+            setTimeout(function() {
+                var cur = sel.options[sel.selectedIndex];
+                input.value = (cur && cur.value) ? cur.textContent : '';
+            }, 150);
+        });
+        document.addEventListener('click', function(e) {
+            if (!wrapper.contains(e.target)) { list.style.display = 'none'; }
+        });
+
+        var curOpt = sel.options[sel.selectedIndex];
+        if (curOpt && curOpt.value) { input.value = curOpt.textContent; }
+    }
+
+    window.initSearchableSelects = function() {
+        var nodes = document.querySelectorAll('select.searchable');
+        Array.prototype.forEach.call(nodes, function(sel) {
+            if (sel.getAttribute('data-searchable-init') === '1') return;
+            sel.setAttribute('data-searchable-init', '1');
+            buildSearchable(sel);
+        });
+    };
 })();

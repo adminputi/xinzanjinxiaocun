@@ -17,7 +17,7 @@ $perPage = ITEMS_PER_PAGE; $offset = ($page-1)*$perPage;
 $stmt = $pdo->prepare("SELECT COUNT(*) FROM purchase_orders o LEFT JOIN suppliers s ON o.supplier_id=s.id $where"); $stmt->execute($params); $total = $stmt->fetchColumn();
 $pages = ceil($total/$perPage);
 
-$stmt = $pdo->prepare("SELECT o.*, s.name as supplier_name, w.name as warehouse_name, u.real_name as employee_name, (SELECT COUNT(*) FROM purchase_instocks WHERE order_id=o.id) as instock_count FROM purchase_orders o LEFT JOIN suppliers s ON o.supplier_id=s.id LEFT JOIN warehouses w ON o.warehouse_id=w.id LEFT JOIN users u ON o.employee_id=u.id $where ORDER BY o.id DESC LIMIT $offset,$perPage");
+$stmt = $pdo->prepare("SELECT o.*, s.name as supplier_name, w.name as warehouse_name, u.real_name as employee_name, (SELECT COUNT(*) FROM purchase_instocks WHERE order_id=o.id AND status='confirmed') as instock_count FROM purchase_orders o LEFT JOIN suppliers s ON o.supplier_id=s.id LEFT JOIN warehouses w ON o.warehouse_id=w.id LEFT JOIN users u ON o.employee_id=u.id $where ORDER BY o.id DESC LIMIT $offset,$perPage");
 $stmt->execute($params); $list = $stmt->fetchAll();
 
 $suppliers = get_options('suppliers', 'id', 'name', 'status=1');
@@ -96,6 +96,46 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'change_
     }
     redirect("order.php?page=$page");
 }
+
+// 删除采购订单（无关联入库单 + 无付款记录才可删，不限单据状态）
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'delete') {
+    csrf_verify();
+    $oid = intval($_POST['id']??0);
+
+    $st = $pdo->prepare("SELECT * FROM purchase_orders WHERE id=?");
+    $st->execute([$oid]);
+    $order = $st->fetch();
+    if (!$order) {
+        $error = '订单不存在';
+    } else {
+        // 校验1：存在关联入库单（任何状态）则不允许删除
+        $st = $pdo->prepare("SELECT COUNT(*) FROM purchase_instocks WHERE order_id=?");
+        $st->execute([$oid]);
+        $instockCount = intval($st->fetchColumn());
+
+        // 校验2：已产生付款则不允许删除
+        $paidAmount = floatval($order['paid_amount'] ?? 0);
+
+        if ($instockCount > 0) {
+            $error = '该订单已存在入库单，请先删除关联入库单后再删除订单';
+        } elseif ($paidAmount > 0) {
+            $error = '该订单已有付款记录（已付 ¥' . format_money($paidAmount) . '），不允许删除';
+        } else {
+            $pdo->beginTransaction();
+            try {
+                $pdo->prepare("DELETE FROM purchase_order_items WHERE order_id=?")->execute([$oid]);
+                $pdo->prepare("DELETE FROM purchase_orders WHERE id=?")->execute([$oid]);
+                add_log(get_user_id(), 'delete', 'purchase_order', "删除采购订单: {$order['bill_no']}");
+                $pdo->commit();
+            } catch (Exception $e) {
+                $pdo->rollBack();
+                error_log('Purchase order delete error: '.$e->getMessage());
+                $error = '删除失败，请稍后重试';
+            }
+        }
+    }
+    if (!isset($error)) { redirect("order.php?page=$page"); }
+}
 ?>
 
 <div class="page-header">
@@ -142,6 +182,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'change_
             <?php endif; ?>
             <?php endif; ?>
             <a href="order_view.php?id=<?=$item['id']?>" class="btn btn-sm btn-outline"><i class="fa-solid fa-eye"></i></a>
+            <?php if (intval($item['instock_count']) == 0 && floatval($item['paid_amount'] ?? 0) == 0): ?>
+            <form method="post" style="display:inline" onsubmit="return confirm('⚠️ 确定删除此采购订单吗？\n\n删除后不可恢复。\n\n单号：<?=$item['bill_no']?>')">
+                <?= csrf_field() ?>
+                <input type="hidden" name="action" value="delete"><input type="hidden" name="id" value="<?=$item['id']?>">
+                <button class="btn btn-sm btn-danger" title="删除订单"><i class="fa-solid fa-trash"></i></button>
+            </form>
+            <?php endif; ?>
         </div>
     </td>
 </tr>

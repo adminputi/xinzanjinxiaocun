@@ -15,12 +15,28 @@ $stmt2 = $pdo->prepare("SELECT i.*, p.name as product_name, p.sku, p.spec, u.nam
 $stmt2->execute([$id]);
 $items = $stmt2->fetchAll();
 $statusLabels = ['draft'=>'草稿','confirmed'=>'已确认','received'=>'已入库','partial'=>'部分入库','completed'=>'已完成','cancelled'=>'已取消'];
+
+// 删除前置校验：无关联入库单 且 无付款记录
+$stmt3 = $pdo->prepare("SELECT COUNT(*) FROM purchase_instocks WHERE order_id=?");
+$stmt3->execute([$id]);
+$instockCount = intval($stmt3->fetchColumn());
+$canDelete = ($instockCount === 0 && floatval($order['paid_amount'] ?? 0) == 0);
 ?>
 
 <div class="page-header">
     <h1 class="page-title"><i class="fa-solid fa-eye"></i> 采购订单详情</h1>
     <div class="page-actions">
+        <?php if (floatval($order['total_amount']) - floatval($order['paid_amount'] ?? 0) > 0.005): ?>
+        <a class="btn btn-success" href="../finance/payment.php?order_id=<?=$order['id']?>"><i class="fa-solid fa-credit-card"></i> 登记付款</a>
+        <?php endif; ?>
         <button class="btn btn-outline" onclick="window.print()"><i class="fa-solid fa-print"></i> 打印</button>
+        <?php if ($canDelete): ?>
+        <form method="post" action="order.php" style="display:inline" onsubmit="return confirm('⚠️ 确定删除此采购订单吗？\n\n删除后不可恢复。\n\n单号：<?=$order['bill_no']?>')">
+            <?= csrf_field() ?>
+            <input type="hidden" name="action" value="delete"><input type="hidden" name="id" value="<?=$order['id']?>">
+            <button class="btn btn-danger"><i class="fa-solid fa-trash"></i> 删除</button>
+        </form>
+        <?php endif; ?>
         <a href="order.php" class="btn btn-outline"><i class="fa-solid fa-arrow-left"></i> 返回</a>
     </div>
 </div>
@@ -28,7 +44,7 @@ $statusLabels = ['draft'=>'草稿','confirmed'=>'已确认','received'=>'已入�
 <div class="card" id="printArea">
     <div class="card-header">
         <h3 class="card-title">采购订单 #<?= $order['bill_no'] ?></h3>
-        <span class="badge badge-<?= ['draft'=>'warning','confirmed'=>'info','received'=>'primary','completed'=>'success','cancelled'=>'gray'][$order['status']] ?>"><?= $statusLabels[$order['status']] ?></span>
+        <span class="badge badge-<?= ['draft'=>'warning','confirmed'=>'info','received'=>'primary','partial'=>'info','completed'=>'success','cancelled'=>'gray'][$order['status']] ?>"><?= $statusLabels[$order['status']] ?></span>
     </div>
     <div class="card-body">
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-bottom:20px;">

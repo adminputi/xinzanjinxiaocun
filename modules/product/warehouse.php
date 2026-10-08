@@ -6,6 +6,11 @@ $pdo = getDB();
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_verify();
     $action = $_POST['action'] ?? '';
+    // 新增/修改/删除仓库需要 warehouse_edit 权限（默认只有管理员拥有），后端必须校验防止绕过按钮直接提交
+    if (in_array($action, ['save', 'delete']) && !check_permission('warehouse_edit')) {
+        flash_set('无权限：只有管理员或被授权的角色才能新增/修改/删除仓库', 'danger');
+        redirect('warehouse.php');
+    }
     if ($action === 'save') {
         $id = intval($_POST['id'] ?? 0);
         $data = [$_POST['name']??'', $_POST['code']??'', $_POST['address']??'', $_POST['manager']??'', $_POST['phone']??''];
@@ -20,7 +25,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
     } elseif ($action === 'delete') {
-        $pdo->prepare("DELETE FROM warehouses WHERE id=?")->execute([intval($_POST['id']??0)]);
+        $id = intval($_POST['id'] ?? 0);
+        // 仓库有库存或出入库记录即不可删，避免库存记录无主
+        $chk = check_refs($id, [
+            '库存记录'   => "SELECT COUNT(*) FROM inventory WHERE warehouse_id=? AND quantity<>0",
+            '采购入库单' => "SELECT COUNT(*) FROM purchase_instocks WHERE warehouse_id=?",
+            '销售出库单' => "SELECT COUNT(*) FROM sales_outstocks WHERE warehouse_id=?",
+            '调拨单(调出)' => "SELECT COUNT(*) FROM transfers WHERE from_warehouse_id=?",
+            '调拨单(调入)' => "SELECT COUNT(*) FROM transfers WHERE to_warehouse_id=?",
+            '盘点单'     => "SELECT COUNT(*) FROM check_orders WHERE warehouse_id=?",
+        ]);
+        if (!$chk['ok']) {
+            flash_set($chk['msg']);
+        } else {
+            $st = $pdo->prepare("SELECT name FROM warehouses WHERE id=?");
+            $st->execute([$id]);
+            $wname = $st->fetchColumn();
+            $pdo->prepare("DELETE FROM warehouses WHERE id=?")->execute([$id]);
+            add_log(get_user_id(), 'delete', 'warehouse', "删除仓库: {$wname}(ID:$id)");
+            flash_set('仓库已删除：' . $wname, 'success');
+        }
     }
     redirect('warehouse.php');
 }
@@ -30,9 +54,12 @@ $list = $pdo->query("SELECT w.*, (SELECT COUNT(DISTINCT product_id) FROM invento
 
 <div class="page-header">
     <h1 class="page-title"><i class="fa-solid fa-warehouse"></i> 仓库管理</h1>
+    <?php if (check_permission('warehouse_edit')): ?>
     <button class="btn btn-primary" onclick="openModal('whModal')"><i class="fa-solid fa-plus"></i> 新增仓库</button>
+    <?php endif; ?>
 </div>
 <?php if (isset($error)): ?><div class="alert alert-danger"><?= $error ?></div><?php endif; ?>
+<?php flash_show(); ?>
 
 <div class="card"><div class="card-body" style="padding:0;"><div class="table-container">
 <table>
@@ -48,8 +75,10 @@ $list = $pdo->query("SELECT w.*, (SELECT COUNT(DISTINCT product_id) FROM invento
     <td><?= htmlspecialchars($item['phone']?:'-') ?></td>
     <td><span class="badge badge-info"><?= $item['product_count'] ?></span></td>
     <td>
+        <?php if (check_permission('warehouse_edit')): ?>
         <button class="btn btn-sm btn-outline" onclick="editWh(<?= htmlspecialchars(json_encode($item, JSON_UNESCAPED_UNICODE)) ?>)"><i class="fa-solid fa-pen"></i></button>
         <form method="post" style="display:inline" onsubmit="return confirm('确定删除？')"><?= csrf_field() ?><input type="hidden" name="action" value="delete"><input type="hidden" name="id" value="<?= $item['id'] ?>"><button class="btn btn-sm btn-outline"><i class="fa-solid fa-trash" style="color:var(--danger)"></i></button></form>
+        <?php endif; ?>
     </td>
 </tr>
 <?php endforeach; ?>

@@ -1,6 +1,7 @@
 <?php
 require_once __DIR__ . '/../../includes/header.php';
-require_permission('master_data');
+// 状态是追踪码的基础数据，独立于「追踪码编辑」单独赋权，默认只有管理员拥有；删除状态仅管理员
+require_permission('tracking_status');
 $pdo = getDB();
 $page = max(1, intval($_GET['page'] ?? 1));
 
@@ -8,6 +9,9 @@ $page = max(1, intval($_GET['page'] ?? 1));
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_verify();
     $act = $_POST['act'] ?? '';
+    if ($act === 'delete' && ($_SESSION['user_role'] ?? '') !== 'admin') {
+        die('<div style="text-align:center;margin-top:100px;"><h3>无权限操作</h3><p>追踪状态的删除仅管理员可执行。</p><a href="statuses.php">返回</a></div>');
+    }
     if ($act === 'save') {
         $id = intval($_POST['id'] ?? 0);
         $name = trim($_POST['name'] ?? '');
@@ -55,11 +59,13 @@ if (($editId = intval($_GET['edit'] ?? 0)) > 0) {
     <td><?=$item['created_at']?></td>
     <td>
         <a href="statuses.php?edit=<?=$item['id']?>" class="btn btn-sm btn-outline"><i class="fa-solid fa-pen"></i></a>
+        <?php if (($_SESSION['user_role'] ?? '') === 'admin'): ?>
         <form method="post" style="display:inline" onsubmit="return confirm('确定删除该状态？')">
             <?=csrf_field()?>
             <input type="hidden" name="act" value="delete"><input type="hidden" name="id" value="<?=$item['id']?>">
-            <button type="submit" class="btn btn-sm btn-danger"><i class="fa-solid fa-trash"></i></button>
+            <button type="submit" class="btn btn-sm btn-danger" title="删除（仅管理员）"><i class="fa-solid fa-trash"></i></button>
         </form>
+        <?php endif; ?>
     </td>
 </tr>
 <?php endforeach; else: ?>

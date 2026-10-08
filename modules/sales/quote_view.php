@@ -13,31 +13,28 @@ if (!$quote) { die('报价单不存在'); }
 // 非admin用户只能查看自己的记录
 if ($_SESSION['user_role'] !== 'admin' && ($quote['user_id'] ?? 0) != get_user_id()) { die('无权查看此记录'); }
 
-$stmt2 = $pdo->prepare("SELECT i.*, p.name as product_name, p.sku, p.spec, p.image as product_image, p.description as product_description, u.name as unit_name FROM sales_quote_items i JOIN products p ON i.product_id=p.id LEFT JOIN units u ON p.unit_id=u.id WHERE i.quote_id=?");
+$stmt2 = $pdo->prepare("SELECT i.*, p.name as product_name, p.sku, p.spec, p.image as product_image, p.description as product_description, u.name as unit_name FROM sales_quote_items i LEFT JOIN products p ON i.product_id=p.id LEFT JOIN units u ON p.unit_id=u.id WHERE i.quote_id=? ORDER BY i.id");
 $stmt2->execute([$id]);
 $items = $stmt2->fetchAll();
-// 将商品图片转为 base64
-foreach ($items as &$it) {
-    $it['image_base64'] = '';
-    if (!empty($it['product_image'])) {
-        $imgPath = __DIR__ . '/../../' . $it['product_image'];
-        if (file_exists($imgPath)) {
-            $data = @file_get_contents($imgPath);
-            if ($data !== false) {
-                $ext = strtolower(pathinfo($imgPath, PATHINFO_EXTENSION));
-                $mime = in_array($ext, ['jpg','jpeg']) ? 'jpeg' : ($ext === 'svg' ? 'svg+xml' : $ext);
-                $it['image_base64'] = 'data:image/' . $mime . ';base64,' . base64_encode($data);
-            }
-        }
+// LEFT JOIN 后商品可能已被物理删除（历史单据会留下悬空明细），这里补名称兜底，与 quote_form.php 保持一致：
+// 保证详情页与打印时该行不会凭空消失，明细金额之和也才能与主表的 total_amount 对得上
+foreach ($items as $k => $it) {
+    if ($it['product_name'] === null || $it['product_name'] === '') {
+        $items[$k]['product_name'] = '商品已删除(ID:' . intval($it['product_id']) . ')';
     }
 }
-unset($it);
+// 注意：商品图片【不在服务端转 base64】。
+// 以前的做法是逐行读取图片文件并 base64 内联到页面的 printData 里，
+// 图片多/大时单页 HTML 会膨胀到几十上百 MB，浏览器必须下载并解析完才会结束加载，
+// 表现为打开详情页时标签一直转圈、无法操作。
+// 现在首屏只输出图片路径（缩略图由浏览器异步加载），
+// 只有点击「打印 / 导出PDF」时才在前端按需把图片转成（压缩后的）dataURL。
 
-$statusLabels = ['draft'=>'可编辑','quoted'=>'已转订单','withdrawn'=>'已撤回'];
-$statusBadges = ['draft'=>'warning','quoted'=>'info','withdrawn'=>'gray'];
+$statusLabels = ['draft'=>'可编辑','quoted'=>'已转订单','contracted'=>'已转合同','withdrawn'=>'已撤回'];
+$statusBadges = ['draft'=>'warning','quoted'=>'info','contracted'=>'primary','withdrawn'=>'gray'];
 
 // 确保打印模板表存在
-try { $pdo->exec("CREATE TABLE IF NOT EXISTS `print_templates` (`id` INT AUTO_INCREMENT PRIMARY KEY, `name` VARCHAR(100) NOT NULL, `type` VARCHAR(30) NOT NULL DEFAULT 'sales_order', `content` TEXT, `is_default` TINYINT DEFAULT 0, `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"); } catch (Exception $e) {}
+ensure_print_templates_table($pdo);
 
 // 获取"产品项目方案单"模板
 $tplStmt = $pdo->prepare("SELECT * FROM print_templates WHERE name=? LIMIT 1");
@@ -80,8 +77,12 @@ if (!$tpl) {
     . '<strong>备注：</strong><br>{remark}'
     . '</div>'
     . '</div>';
-    $pdo->prepare("INSERT INTO print_templates (name,type,content,is_default) VALUES (?,?,?,0)")
-        ->execute(['产品项目方案单（含图片+描述）', 'quote', $quoteTplContent]);
+    try {
+        $pdo->prepare("INSERT INTO print_templates (name,type,content,is_default) VALUES (?,?,?,0)")
+            ->execute(['产品项目方案单（含图片+描述）', 'quote', $quoteTplContent]);
+    } catch (Exception $e) {
+        error_log('print_templates quote init failed: ' . $e->getMessage());
+    }
     $tpl = ['content' => $quoteTplContent];
 }
 
@@ -104,8 +105,18 @@ if ($quote['order_id']) {
 <div class="page-header">
     <h1 class="page-title"><i class="fa-solid fa-file-invoice-dollar"></i> 销售报价详情</h1>
     <div class="page-actions">
-        <button class="btn btn-primary" onclick="printQuote()"><i class="fa-solid fa-print"></i> 打印</button>
-        <button class="btn btn-success" onclick="exportPDF()"><i class="fa-solid fa-file-pdf"></i> 导出PDF</button>
+        <button class="btn btn-primary" id="btnPrint" onclick="printQuote()"><i class="fa-solid fa-print"></i> 打印</button>
+        <button class="btn btn-success" id="btnExport" onclick="exportPDF()"><i class="fa-solid fa-file-pdf"></i> 导出PDF</button>
+        <?php if (!empty($quote['contract_id'])): ?>
+        <a href="contract_form.php?id=<?=intval($quote['contract_id'])?>" class="btn btn-outline"><i class="fa-solid fa-file-signature"></i> 查看合同</a>
+        <?php elseif (in_array($quote['status'], ['draft','withdrawn'], true)): ?>
+        <form method="post" action="quote.php" style="display:inline;" onsubmit="return confirm('确定将该报价单转为销售合同吗？将生成一份草稿合同，明细沿用本报价单。');">
+            <?= csrf_field() ?>
+            <input type="hidden" name="action" value="to_contract">
+            <input type="hidden" name="id" value="<?=$quote['id']?>">
+            <button type="submit" class="btn btn-outline"><i class="fa-solid fa-file-signature"></i> 转合同</button>
+        </form>
+        <?php endif; ?>
         <a href="quote.php" class="btn btn-outline"><i class="fa-solid fa-arrow-left"></i> 返回列表</a>
     </div>
 </div>
@@ -164,10 +175,17 @@ if ($quote['order_id']) {
 
 <div class="card mt-2"><div class="card-body" style="padding:0;"><div class="table-container">
 <table>
-<thead><tr><th>SKU</th><th>商品名称</th><th>规格</th><th>单位</th><th>单价</th><th>数量</th><th>金额</th><th>备注</th></tr></thead>
+<thead><tr><th style="width:52px;">图片</th><th>SKU</th><th>商品名称</th><th>规格</th><th>单位</th><th>单价</th><th>数量</th><th>金额</th><th>备注</th></tr></thead>
 <tbody>
 <?php if ($items): foreach ($items as $it): ?>
 <tr>
+    <td>
+    <?php if (!empty($it['product_image'])): ?>
+    <img src="../../<?= htmlspecialchars($it['product_image']) ?>" loading="lazy" decoding="async" style="width:40px;height:40px;object-fit:cover;border-radius:4px;cursor:pointer;" onclick="previewImage('../../<?= htmlspecialchars($it['product_image']) ?>')" title="点击放大" alt="">
+    <?php else: ?>
+    <span style="display:inline-block;width:40px;height:40px;background:var(--gray-100);border-radius:4px;text-align:center;line-height:40px;color:var(--gray-400);"><i class="fa-solid fa-box"></i></span>
+    <?php endif; ?>
+    </td>
     <td><?= htmlspecialchars($it['sku']?:'-') ?></td>
     <td><strong><?= htmlspecialchars($it['product_name']) ?></strong></td>
     <td><?= htmlspecialchars($it['spec']?:'-') ?></td>
@@ -178,11 +196,11 @@ if ($quote['order_id']) {
     <td><?= htmlspecialchars($it['remark']?:'') ?></td>
 </tr>
 <?php endforeach; else: ?>
-<tr><td colspan="8"><div class="empty-state"><i class="fa-solid fa-box"></i><p>暂无明细</p></div></td></tr>
+<tr><td colspan="9"><div class="empty-state"><i class="fa-solid fa-box"></i><p>暂无明细</p></div></td></tr>
 <?php endif; ?>
 </tbody>
 <tfoot>
-    <tr><td colspan="6" class="text-right"><strong>合计：</strong></td><td><strong style="color:var(--danger)">¥<?= format_money($quote['total_amount']) ?></strong></td><td></td></tr>
+    <tr><td colspan="7" class="text-right"><strong>合计：</strong></td><td><strong style="color:var(--danger)">¥<?= format_money($quote['total_amount']) ?></strong></td><td></td></tr>
 </tfoot>
 </table></div></div></div>
 
@@ -266,6 +284,9 @@ function numToCny(num) {
 
 printData.total_amount_cn = numToCny(<?= $quote['total_amount'] ?>);
 
+// 商品图片：首屏不加载、不编码，只在打印/导出时按需转 dataURL
+// （公共实现见 assets/js/print-image.js：absUrl / preparePrintImages / runPrintAction / previewImage）
+
 function buildItemsHtml(items, templateHtml) {
     if (!items || !items.length) return '<tr><td colspan="10">暂无明细数据</td></tr>';
     var colMap = {
@@ -298,7 +319,7 @@ function buildItemsHtml(items, templateHtml) {
                 if (item.image_base64) {
                     rows += '<td><img src="' + item.image_base64 + '" style="max-width:100px;max-height:75px;object-fit:contain;" alt=""></td>';
                 } else if (item.product_image) {
-                    rows += '<td><img src="../../' + item.product_image + '" style="max-width:100px;max-height:75px;object-fit:contain;" alt=""></td>';
+                    rows += '<td><img src="' + absUrl(item.product_image) + '" loading="lazy" style="max-width:100px;max-height:75px;object-fit:contain;" alt=""></td>';
                 } else {
                     rows += '<td style="color:#999;">-</td>';
                 }
@@ -328,14 +349,19 @@ function renderPrintContent() {
     tpl = tpl.replace(/\{items\}/g, buildItemsHtml(printData.items, tpl));
     for (var key in printData) {
         if (printData.hasOwnProperty(key) && key !== 'items') {
+            var val = String(printData[key] == null ? '' : printData[key]);
+            // 总备注可能分行：HTML 会把换行折叠成空格，转成 <br> 打印出来才能正常分行
+            if (key === 'remark') val = val.replace(/\n/g, '<br>');
             var re = new RegExp('\\{' + key + '\\}', 'g');
-            tpl = tpl.replace(re, printData[key] || '');
+            // 用函数形式返回替换值：避免值里的 $& / $1 被当成正则捕获组引用而丢失
+            tpl = tpl.replace(re, function(){ return val; });
         }
     }
     document.getElementById('printContent').innerHTML = tpl;
 }
 
 function printQuote() {
+    runPrintAction(function () {
     renderPrintContent();
     var win = window.open('', '_blank', 'width=900,height=600');
     win.document.write('<html><head><title>报价单打印</title>');
@@ -345,9 +371,11 @@ function printQuote() {
     win.document.write('</body></html>');
     win.document.close();
     setTimeout(function(){win.print();}, 500);
+    }, { items: printData.items });
 }
 
 function exportPDF() {
+    runPrintAction(function () {
     renderPrintContent();
     var win = window.open('', '_blank', 'width=900,height=600');
     win.document.write('<html><head><title>报价单 - <?= js_escape($quote['bill_no']) ?></title>');
@@ -360,6 +388,7 @@ function exportPDF() {
         win.print();
         setTimeout(function(){ win.close(); }, 1000);
     }, 500);
+    }, { items: printData.items });
 }
 </script>
 

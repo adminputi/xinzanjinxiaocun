@@ -47,6 +47,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'delet
 // ===== 页面渲染（从此处开始输出HTML） =====
 require_once __DIR__ . '/../../includes/header.php';
 require_once __DIR__ . '/../../includes/functions.php';
+require_once __DIR__ . '/../../includes/migration.php';
 require_permission('system');
 
 $dbName = DB_NAME;
@@ -131,43 +132,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'resto
     if (empty($restoreFile) || !preg_match('/^backup_.*\.sql$/', $restoreFile) || !file_exists($backupDir . $restoreFile)) {
         $error = '备份文件不存在';
     } else {
+        @set_time_limit(0);
+        @ini_set('memory_limit', '512M');
+        $conflict = in_array(($_POST['conflict'] ?? 'skip'), ['skip', 'overwrite', 'clean', 'strict'], true)
+            ? $_POST['conflict'] : 'skip';
         try {
             $sql = file_get_contents($backupDir . $restoreFile);
-            if (empty($sql)) throw new Exception('备份文件为空');
+            if ($sql === false || trim($sql) === '') throw new Exception('备份文件为空');
+
+            $dropped = 0;
+            if ($conflict === 'clean') { $dropped = drop_all_tables($pdo); }
 
             $pdo->exec('SET FOREIGN_KEY_CHECKS = 0');
-            $pdo->beginTransaction();
+            $hasTx = $pdo->beginTransaction();
 
-            // 统一SQL分割逻辑：按 ; + 换行拆分
-            $sql = str_replace("\r\n", "\n", $sql);
-            $queries = array_filter(array_map('trim', explode(";\n", $sql)), function($q) {
-                $q = trim($q);
-                return !empty($q) && strpos($q, '--') !== 0;
-            });
+            $stat = apply_sql_dump($pdo, $sql, $conflict);
 
-            $tableCount = 0;
-            foreach ($queries as $q) {
-                if (!empty(trim($q))) {
-                    try {
-                        $pdo->exec($q);
-                        if (stripos($q, 'CREATE TABLE') !== false || stripos($q, 'INSERT INTO') !== false) {
-                            $tableCount++;
-                        }
-                    } catch (Exception $e) {
-                        if (strpos($e->getMessage(), 'already exists') === false) throw $e;
-                    }
-                }
-            }
-
-            $pdo->commit();
+            // DDL 会隐式提交，此时事务可能已结束，直接 commit 会抛 "There is no active transaction"
+            if ($hasTx && $pdo->inTransaction()) { $pdo->commit(); }
             $pdo->exec('SET FOREIGN_KEY_CHECKS = 1');
             add_log(get_user_id(), 'restore', 'system', "数据库恢复: $restoreFile");
-            $success = "数据库恢复成功！（文件：{$restoreFile}）";
+            $success = "数据库恢复成功！（文件：{$restoreFile}，执行 {$stat['executed']} 条" .
+                       ($stat['skipped'] ? "，跳过 {$stat['skipped']} 条" : '') .
+                       ($dropped ? "，清库 {$dropped} 张表" : '') . '）';
+            // 老库导入后补齐新版表结构
+            try { run_migrations(); } catch (Exception $me) { error_log('Migration after restore: '.$me->getMessage()); }
         } catch (Exception $e) {
-            if ($pdo->inTransaction()) { $pdo->rollBack(); }
+            try { if ($pdo->inTransaction()) { $pdo->rollBack(); } } catch (Exception $re) {}
             try { $pdo->exec('SET FOREIGN_KEY_CHECKS = 1'); } catch (Exception $e2) {}
             error_log('Restore error: '.$e->getMessage());
-            $error = '恢复失败，请稍后重试';
+            $error = '恢复失败：' . $e->getMessage();
         }
     }
 }
@@ -176,47 +170,67 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'resto
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'upload_restore' && isset($_FILES['sql_file'])) {
     csrf_verify();
     try {
-        if ($_FILES['sql_file']['error'] !== UPLOAD_ERR_OK) throw new Exception('文件上传失败');
+        // 大文件导入可能耗时较长
+        @set_time_limit(0);
+        @ini_set('memory_limit', '512M');
+        if ($_FILES['sql_file']['error'] !== UPLOAD_ERR_OK) {
+            $upErrMap = [
+                UPLOAD_ERR_INI_SIZE   => '文件超过服务器 upload_max_filesize 限制',
+                UPLOAD_ERR_FORM_SIZE  => '文件超过表单限制',
+                UPLOAD_ERR_PARTIAL    => '文件仅部分上传',
+                UPLOAD_ERR_NO_FILE    => '没有选择文件',
+                UPLOAD_ERR_NO_TMP_DIR => '服务器缺少临时目录',
+                UPLOAD_ERR_CANT_WRITE => '服务器无法写入临时文件',
+                UPLOAD_ERR_EXTENSION  => '上传被服务器扩展阻止',
+            ];
+            $code = $_FILES['sql_file']['error'];
+            throw new Exception($upErrMap[$code] ?? ('文件上传失败（错误码 ' . $code . '）'));
+        }
         $tmpName = $_FILES['sql_file']['tmp_name'];
         $origName = $_FILES['sql_file']['name'];
         // 验证上传文件扩展名
         $upExt = strtolower(pathinfo($origName, PATHINFO_EXTENSION));
         if ($upExt !== 'sql') throw new Exception('仅支持 .sql 文件');
-        // 验证上传文件 MIME
-        $upMime = mime_content_type($tmpName);
-        if (!in_array($upMime, ['text/plain', 'text/x-sql', 'application/octet-stream', 'application/sql'])) {
-            throw new Exception('文件类型不合法');
+        // 验证上传文件 MIME（兼容未安装 fileinfo 扩展的环境）
+        // MySQL 导出的 .sql 可能被识别为 text/x-c、text/x-c++、text/x-asm 等，统一放行 text/*
+        $upMime = detect_mime_type($tmpName);
+        if (strpos($upMime, 'text/') !== 0
+            && !in_array($upMime, ['application/octet-stream', 'application/sql', 'inode/x-empty'])) {
+            throw new Exception('文件类型不合法（检测到：' . $upMime . '）');
         }
         $destName = 'uploaded_' . date('Ymd_His') . '_' . preg_replace('/[^a-zA-Z0-9._-]/', '_', $origName);
-        move_uploaded_file($tmpName, $backupDir . $destName);
-
-        $sql = file_get_contents($backupDir . $destName);
-        if (empty($sql)) throw new Exception('文件为空');
-
-        $pdo->exec('SET FOREIGN_KEY_CHECKS = 0');
-        $pdo->beginTransaction();
-
-        // 统一SQL分割逻辑：按 ; + 换行拆分
-        $sql = str_replace("\r\n", "\n", $sql);
-        $queries = array_filter(array_map('trim', explode(";\n", $sql)), function($q) {
-            $q = trim($q);
-            return !empty($q) && strpos($q, '--') !== 0;
-        });
-        foreach ($queries as $q) {
-            try { $pdo->exec($q); } catch (Exception $e) {
-                if (strpos($e->getMessage(), 'already exists') === false) throw $e;
-            }
+        if (!move_uploaded_file($tmpName, $backupDir . $destName)) {
+            throw new Exception('文件保存失败，请检查 backups 目录权限');
         }
 
-        $pdo->commit();
+        $sql = file_get_contents($backupDir . $destName);
+        if ($sql === false || trim($sql) === '') throw new Exception('文件为空或无法读取');
+
+        $conflict = in_array(($_POST['conflict'] ?? 'skip'), ['skip', 'overwrite', 'clean', 'strict'], true)
+            ? $_POST['conflict'] : 'skip';
+
+        $dropped = 0;
+        if ($conflict === 'clean') { $dropped = drop_all_tables($pdo); }
+
+        $pdo->exec('SET FOREIGN_KEY_CHECKS = 0');
+        $hasTx = $pdo->beginTransaction();
+
+        $stat = apply_sql_dump($pdo, $sql, $conflict);
+
+        // DDL 会隐式提交，事务可能已结束，直接 commit 会抛 "There is no active transaction"
+        if ($hasTx && $pdo->inTransaction()) { $pdo->commit(); }
         $pdo->exec('SET FOREIGN_KEY_CHECKS = 1');
         add_log(get_user_id(), 'restore', 'system', "数据库恢复(上传): $origName");
-        $success = "数据库恢复成功！";
+        $success = "数据库恢复成功！（文件：{$origName}，执行 {$stat['executed']} 条" .
+                   ($stat['skipped'] ? "，跳过 {$stat['skipped']} 条" : '') .
+                   ($dropped ? "，清库 {$dropped} 张表" : '') . '）';
+        // 老库导入后补齐新版表结构
+        try { run_migrations(); } catch (Exception $me) { error_log('Migration after restore: '.$me->getMessage()); }
     } catch (Exception $e) {
-        if ($pdo->inTransaction()) { $pdo->rollBack(); }
+        try { if ($pdo->inTransaction()) { $pdo->rollBack(); } } catch (Exception $re) {}
         try { $pdo->exec('SET FOREIGN_KEY_CHECKS = 1'); } catch (Exception $e2) {}
         error_log('Upload restore error: '.$e->getMessage());
-        $error = '恢复失败，请稍后重试';
+        $error = '恢复失败：' . $e->getMessage();
     }
 }
 
@@ -278,11 +292,20 @@ foreach ($tables as $t) {
                 <p style="color:var(--gray-500);font-size:13px;margin-bottom:16px;">
                     从本地上传之前备份的SQL文件进行恢复。<b style="color:var(--danger)">恢复操作会覆盖现有数据，请谨慎操作！</b>
                 </p>
-                <form method="post" enctype="multipart/form-data" onsubmit="return confirm('⚠️ 恢复操作将覆盖现有数据，确定继续吗？')">
+                <form method="post" enctype="multipart/form-data" onsubmit="return confirm(this.conflict.value==='clean' ? '⚠️ 将【清空当前数据库】后再导入备份，当前所有数据会被删除且不可恢复，确定继续吗？' : '⚠️ 恢复操作会写入备份数据，确定继续吗？')">
                     <?= csrf_field() ?>
                     <input type="hidden" name="action" value="upload_restore">
                     <div class="form-group">
                         <input type="file" name="sql_file" accept=".sql" required style="margin-bottom:12px;">
+                    </div>
+                    <div class="form-group">
+                        <label style="font-size:13px;color:var(--gray-600);">数据冲突处理</label>
+                        <select name="conflict" class="form-control" style="margin-bottom:12px;">
+                            <option value="skip">跳过已存在记录（保留当前数据，推荐）</option>
+                            <option value="overwrite">覆盖同名记录（用备份数据替换）</option>
+                            <option value="clean">先清空当前数据库再导入（当前数据全部删除，最彻底）</option>
+                            <option value="strict">严格模式（遇冲突立即报错停止）</option>
+                        </select>
                     </div>
                     <button type="submit" class="btn btn-danger"><i class="fa-solid fa-rotate-left"></i> 上传并恢复</button>
                 </form>
@@ -317,6 +340,7 @@ foreach ($tables as $t) {
                                             <?= csrf_field() ?>
                                             <input type="hidden" name="action" value="restore">
                                             <input type="hidden" name="restore_file" value="<?=htmlspecialchars($b['name'])?>">
+                                            <input type="hidden" name="conflict" value="skip">
                                             <button class="btn btn-sm btn-outline" title="恢复" style="color:var(--warning)"><i class="fa-solid fa-rotate-left"></i></button>
                                         </form>
                                         <form method="post" style="display:inline" onsubmit="return confirm('确定删除此备份文件？')">

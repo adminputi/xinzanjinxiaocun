@@ -24,7 +24,7 @@ $suppliers = get_options('suppliers', 'id', 'name', 'status=1');
 $warehouses = get_options('warehouses', 'id', 'name', 'status=1');
 $employees = get_options('users', 'id', 'real_name', 'status=1');
 // 产品列表转为JSON供前端弹窗搜索使用
-$products = $pdo->query("SELECT id, sku, name, spec, purchase_price, (SELECT name FROM units WHERE id=unit_id) as unit_name FROM products WHERE status=1 ORDER BY id")->fetchAll();
+$products = $pdo->query("SELECT id, sku, name, spec, image, purchase_price, (SELECT name FROM units WHERE id=unit_id) as unit_name FROM products WHERE status=1 ORDER BY id")->fetchAll();
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_verify();
@@ -94,6 +94,8 @@ foreach ($products as $p) {
         'sku' => $p['sku'],
         'name' => $p['name'],
         'spec' => $p['spec'],
+        // 图片路径在库里是 uploads/products/... ，本页位于 /modules/purchase/ 下，需补 ../../ 前缀
+        'image_url' => $p['image'] ? '../../' . $p['image'] : '',
         'purchase_price' => floatval($p['purchase_price']),
         'unit_name' => $p['unit_name'],
     ];
@@ -114,7 +116,7 @@ foreach ($products as $p) {
             <div class="form-row">
                 <div class="form-group">
                     <label class="form-label">供应商 <span class="required">*</span></label>
-                    <select name="supplier_id" class="form-control" required>
+                    <select name="supplier_id" class="form-control searchable" data-ajax="/api/search_partners.php?type=supplier" required>
                         <option value="">请选择供应商</option>
                         <?php foreach($suppliers as $sid=>$sname): ?><option value="<?=$sid?>" <?=$order&&$order['supplier_id']==$sid?'selected':''?>><?=$sname?></option><?php endforeach; ?>
                     </select>
@@ -220,7 +222,7 @@ foreach ($products as $p) {
             </div>
             <div style="max-height:420px;overflow-y:auto;">
                 <table class="table-select" style="width:100%;">
-                    <thead><tr><th style="width:40px;"><input type="checkbox" id="selectAll" onchange="toggleSelectAll(this)" title="全选/取消"></th><th>SKU</th><th>商品名称</th><th>规格型号</th><th>单位</th><th style="width:80px;">采购价</th></tr></thead>
+                    <thead><tr><th style="width:40px;"><input type="checkbox" id="selectAll" onchange="toggleSelectAll(this)" title="全选/取消"></th><th style="width:52px;">图片</th><th>SKU</th><th>商品名称</th><th>规格型号</th><th>单位</th><th style="width:80px;">采购价</th><th style="width:100px;">数量</th></tr></thead>
                     <tbody id="productList"></tbody>
                 </table>
                 <div id="noProduct" style="display:none;text-align:center;padding:24px;color:var(--gray-500);">没有匹配的商品</div>
@@ -255,6 +257,39 @@ foreach ($products as $p) {
 // 产品数据
 var allProducts = <?= json_encode($productsJson, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG) ?>;
 
+// 已勾选商品的数量：{商品ID: 数量}
+// filterProducts() 每次输入关键词都会重建整个 tbody，若不在这里留存，
+// 用户换一个搜索词再切回来，之前勾选的行和填好的数量就被清空了。
+var pickedQty = {};
+
+// 勾选状态变化时同步数量表；取消勾选即丢弃该行数量
+function syncPick(tr, checked) {
+    var pid = tr.getAttribute('data-id');
+    if (!checked) { delete pickedQty[pid]; return; }
+    var inp = tr.querySelector('.sel-qty');
+    var v = inp ? parseFloat(inp.value) : 1;
+    pickedQty[pid] = (isFinite(v) && v > 0) ? v : 1;
+}
+
+// 输入数量时自动勾选该行。
+// 否则用户填了数量却没打勾，点「确认」时该行会被 addSelectedProducts 静默跳过，且毫无提示。
+// 不清空/非法的输入不会被在这里强行改写 value（避免用户想输 5 时先清成 1 导致变成 15），只取消勾选。
+function pickQty(input, pid) {
+    var tr = input.closest('tr');
+    var cb = tr.querySelector('.product-check');
+    var v = parseFloat(input.value);
+    if (!isFinite(v) || v <= 0) {
+        delete pickedQty[pid];
+        cb.checked = false;
+        tr.classList.remove('selected');
+    } else {
+        pickedQty[pid] = v;
+        cb.checked = true;
+        tr.classList.add('selected');
+    }
+    updateSelectAll();
+}
+
 function filterProducts() {
     var q = document.getElementById('productSearch').value.toLowerCase();
     var tbody = document.getElementById('productList');
@@ -268,13 +303,18 @@ function filterProducts() {
         if (q && text.indexOf(q) === -1) return;
         visible++;
         var spec = p.spec || '-';
-        rows += '<tr data-id="'+p.id+'" data-price="'+p.purchase_price+'" data-name="'+escapeHtml(p.name)+'" data-sku="'+escapeHtml(p.sku)+'" data-spec="'+escapeHtml(spec)+'" data-unit="'+(p.unit_name||'')+'" onclick="toggleProductRow(this)">'
-            + '<td><input type="checkbox" class="product-check" onclick="event.stopPropagation();syncRowCheck(this);"></td>'
+        var picked = pickedQty.hasOwnProperty(p.id);
+        var qty = picked ? pickedQty[p.id] : 1;
+        rows += '<tr'+(picked?' class="selected"':'')+' data-id="'+p.id+'" data-price="'+p.purchase_price+'" data-name="'+escapeHtml(p.name)+'" data-sku="'+escapeHtml(p.sku)+'" data-spec="'+escapeHtml(spec)+'" data-unit="'+(p.unit_name||'')+'" onclick="toggleProductRow(this)">'
+            + '<td><input type="checkbox" class="product-check"'+(picked?' checked':'')+' onclick="event.stopPropagation();syncRowCheck(this);"></td>'
+            + '<td>'+productThumbHtml(p.image_url, 40)+'</td>'
             + '<td>'+escapeHtml(p.sku)+'</td>'
             + '<td><strong>'+escapeHtml(p.name)+'</strong></td>'
             + '<td>'+escapeHtml(spec)+'</td>'
             + '<td>'+(p.unit_name||'-')+'</td>'
             + '<td>¥'+p.purchase_price.toFixed(2)+'</td>'
+            + '<td><input type="number" class="form-control sel-qty" value="'+qty+'" min="1" step="1" style="width:80px;text-align:center;"'
+            + ' onclick="event.stopPropagation()" oninput="pickQty(this,'+p.id+')" title="输入本次数量，自动勾选"></td>'
             + '</tr>';
     });
     tbody.innerHTML = rows;
@@ -287,22 +327,46 @@ function escapeHtml(str) {
     return div.innerHTML;
 }
 
+// 商品缩略图：无图时返回灰色占位方块，避免该列塌缩导致每次搜索都抖动。
+// 返回的 HTML 已自行转义，不要再对它二次 escapeHtml。
+// 点击图片调用 previewImage() 放大 —— 该函数由 assets/js/print-image.js 提供，
+// includes/footer.php 已全局引入，本页 :387 处 require 了 footer.php，可直接用。
+function productThumbHtml(url, size) {
+    size = size || 40;
+    if (!url) {
+        return '<span style="display:inline-block;width:'+size+'px;height:'+size+'px;background:var(--gray-100);border-radius:4px;text-align:center;line-height:'+size+'px;color:var(--gray-400);font-size:16px;"><i class="fa-solid fa-box"></i></span>';
+    }
+    // src 属性：escapeHtml() 不转义双引号，这里必须自己转，否则带引号的路径会截断属性
+    var src = String(url).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    // onclick 参数：JSON.stringify 生成合法的 JS 字符串字面量，再把双引号转 &quot; 以便安全放进 HTML 属性
+    var arg = JSON.stringify(String(url)).replace(/"/g,'&quot;');
+    return '<img src="'+src+'" loading="lazy" decoding="async" style="width:'+size+'px;height:'+size+'px;object-fit:cover;border-radius:4px;cursor:pointer;"'
+        + ' onclick="previewImage('+arg+')" onerror="this.onerror=null;this.style.visibility=\'hidden\';" title="点击放大" alt="">';
+}
+
 function toggleProductRow(tr) {
     var cb = tr.querySelector('.product-check');
     cb.checked = !cb.checked;
     tr.classList.toggle('selected', cb.checked);
+    syncPick(tr, cb.checked);
     updateSelectAll();
 }
 
 function syncRowCheck(cb) {
-    cb.closest('tr').classList.toggle('selected', cb.checked);
+    var tr = cb.closest('tr');
+    tr.classList.toggle('selected', cb.checked);
+    syncPick(tr, cb.checked);
     updateSelectAll();
 }
 
 function toggleSelectAll(cb) {
     var checks = document.querySelectorAll('#productList .product-check');
     checks.forEach(function(c) { c.checked = cb.checked; });
-    document.querySelectorAll('#productList tr').forEach(function(r) { r.classList.toggle('selected', cb.checked); });
+    document.querySelectorAll('#productList tr').forEach(function(r) {
+        r.classList.toggle('selected', cb.checked);
+        syncPick(r, cb.checked);
+    });
+    updateSelectAll();
 }
 
 function updateSelectAll() {
@@ -311,7 +375,9 @@ function updateSelectAll() {
     document.getElementById('selectAll').checked = allChecked;
 }
 
+// 每次打开弹窗都清空已选数量：本次选择是新一轮操作，不应残留上一次的数据
 function openProductModal() {
+    pickedQty = {};
     openModal('productModal');
     filterProducts(); // 初始渲染
     document.getElementById('productSearch').value = '';
@@ -344,11 +410,20 @@ function addSelectedProducts() {
         var price = tr.getAttribute('data-price');
         var unit = tr.getAttribute('data-unit');
 
+        // 取弹窗里填的数量（默认 1）；非法值兜底为 1
+        var qtyInp = tr.querySelector('.sel-qty');
+        var qty = qtyInp ? (parseFloat(qtyInp.value) || 1) : 1;
+        if (qty <= 0) qty = 1;
+        // 小计不能再用原来的 value="'+price+'"（那是写死的「单价×1」）。
+        // calcTotal() 是累加 .amount-display 的值，不填对这里，行小计和总合计都会显示成单价×1。
+        // 后端保存时会用 数量×单价 重新计算，不受影响，但用户保存前看到的金额必须是正确的。
+        var amount = (parseFloat(price) * qty).toFixed(2);
+
         var rowHtml = '<tr class="editable-row">'
             + '<td><input type="hidden" name="product_id[]" value="'+pid+'"><span class="product-display">'+name+' <small style="color:var(--gray-500)">['+sku+'] '+spec+'</small></span></td>'
-            + '<td><div class="qty-stepper"><button type="button" class="stepper-btn" onclick="qtyDown(this)">−</button><input type="number" name="quantity[]" class="form-control qty-input" value="1" min="1" step="1" onchange="calcRow(this)" style="text-align:center;" required><button type="button" class="stepper-btn" onclick="qtyUp(this)">+</button></div></td>'
+            + '<td><div class="qty-stepper"><button type="button" class="stepper-btn" onclick="qtyDown(this)">−</button><input type="number" name="quantity[]" class="form-control qty-input" value="'+qty+'" min="1" step="1" onchange="calcRow(this)" style="text-align:center;" required><button type="button" class="stepper-btn" onclick="qtyUp(this)">+</button></div></td>'
             + '<td><input type="number" step="0.01" name="price[]" class="form-control number-input price-input" value="'+price+'" onchange="calcRow(this)" required></td>'
-            + '<td><input type="text" class="form-control amount-display" value="'+price+'" readonly></td>'
+            + '<td><input type="text" class="form-control amount-display" value="'+amount+'" readonly></td>'
             + '<td><input type="text" name="item_remark[]" class="form-control" placeholder="行备注"></td>'
             + '<td><button type="button" class="btn btn-sm btn-danger" onclick="this.closest(\'tr\').remove();calcTotal();">×</button></td>'
             + '</tr>';
