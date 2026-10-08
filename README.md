@@ -60,3 +60,5 @@
 
 当前版本：V1.3.2
 发布日志见 `CHANGELOG.md`
+
+版本号定义在 `includes/functions.php` 的 `APP_VERSION` 常量，页面的「系统版本 / 系统名称」自动跟随。升级时：改这个常量 + 同步本文件与 `CHANGELOG.md`。

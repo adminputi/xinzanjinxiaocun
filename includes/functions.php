@@ -2,6 +2,15 @@
 /**
  * 公共函数库
  */
+
+/**
+ * 系统版本号 —— 页面显示的「系统版本 / 系统名称」都从这里取，升级时只改这一处
+ * 注意：README.md、CHANGELOG.md 里的版本号属于文档正文，仍需手动同步
+ */
+if (!defined('APP_VERSION')) {
+    define('APP_VERSION', 'V1.3.2');
+}
+
 require_once __DIR__ . '/../config/database.php';
 session_start([
     'cookie_httponly' => true,
