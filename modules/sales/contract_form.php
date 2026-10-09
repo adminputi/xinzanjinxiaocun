@@ -453,46 +453,8 @@ var payTypes = <?= json_encode(array_reduce($payTypes, function($carry, $pt){
 var termsEdited = <?= (!empty($contract['payment_terms'])) ? 'true' : 'false' ?>;
 document.getElementById('paymentTerms').addEventListener('input', function(){ termsEdited = true; });
 
-function numToCny(num) {
-    if (num === null || num === undefined || isNaN(num)) return '';
-    num = Math.abs(Number(num));
-    if (num === 0) return '零元整';
-    var upper = ['零','壹','贰','叁','肆','伍','陆','柒','捌','玖'];
-    var unit = ['', '拾', '佰', '仟'];
-    var bigUnit = ['', '万', '亿', '万亿'];
-    var s = num.toFixed(2);
-    var parts = s.split('.');
-    var intPart = parts[0];
-    var decPart = parts[1];
-    var intStr = '';
-    var len = intPart.length;
-    for (var i = 0; i < len; i++) {
-        var n = parseInt(intPart.charAt(i), 10);
-        var posInGroup = (len - 1 - i) % 4;
-        var groupIdx = Math.floor((len - 1 - i) / 4);
-        var u = unit[posInGroup];
-        var bu = bigUnit[groupIdx];
-        if (n !== 0) {
-            intStr += upper[n] + u + (u === '' ? bu : '');
-        } else {
-            if (intStr.length > 0 && intStr.slice(-1) !== '零' && posInGroup !== 0) {
-                intStr += '零';
-            }
-        }
-    }
-    intStr = intStr.replace(/零+$/, '').replace(/零+/g, '零');
-    var result = intStr + '元';
-    var jiao = parseInt(decPart.charAt(0), 10);
-    var fen = parseInt(decPart.charAt(1), 10);
-    if (jiao === 0 && fen === 0) {
-        result += '整';
-    } else {
-        if (jiao > 0) result += upper[jiao] + '角';
-        else if (fen > 0) result += '零';
-        if (fen > 0) result += upper[fen] + '分';
-    }
-    return result;
-}
+// numToCny 已抽取为全站唯一实现：assets/js/num-cny.js
+// （由 includes/header.php 在页面 head 里引入，本页不再内联定义，避免多份副本算出不同结果）
 
 function money(n) { return (Math.round(Number(n) * 100) / 100).toFixed(2); }
 

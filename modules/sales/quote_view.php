@@ -233,55 +233,8 @@ var printData = {
     items: <?= json_encode($items, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG) ?>
 };
 
-// 数字转中文大写
-function numToCny(num) {
-    if (isNaN(num) || num === '' || num === null) return '零元整';
-    var n = Number(num);
-    if (n >= 1e12) return '金额超出范围';
-    if (n === 0) return '零元整';
-    var digit = ['零','壹','贰','叁','肆','伍','陆','柒','捌','玖'];
-    var unit = ['','拾','佰','仟'];
-    var bigUnit = ['','万','亿'];
-    var decUnit = ['角','分'];
-    var integerPart = Math.floor(n);
-    var decimalPart = Math.round((n - integerPart) * 100);
-    var result = '';
-    var zeroFlag = false;
-    if (integerPart === 0) result = '零';
-    else {
-        var strInt = String(integerPart);
-        var len = strInt.length;
-        for (var i = 0; i < len; i++) {
-            var d = parseInt(strInt[i]);
-            var pos = len - i - 1;
-            var unitPos = pos % 4;
-            var bigPos = Math.floor(pos / 4);
-            if (d === 0) { zeroFlag = true; }
-            else {
-                if (zeroFlag && result !== '') result += '零';
-                zeroFlag = false;
-                result += digit[d];
-                if (unitPos > 0) result += unit[unitPos];
-            }
-            if (unitPos === 0 && bigPos > 0 && !zeroFlag) result += bigUnit[bigPos];
-            else if (unitPos === 0 && bigPos > 0 && zeroFlag) {
-                var hasNonZero = false;
-                for (var j = i - unitPos; j <= i; j++) { if (parseInt(strInt[j]) !== 0) hasNonZero = true; }
-                if (hasNonZero) result += bigUnit[bigPos];
-            }
-        }
-    }
-    result += '元';
-    if (decimalPart === 0) result += '整';
-    else {
-        var jiao = Math.floor(decimalPart / 10);
-        var fen = decimalPart % 10;
-        if (jiao > 0) result += digit[jiao] + '角';
-        if (fen > 0) result += digit[fen] + '分';
-    }
-    return result;
-}
-
+// numToCny 已抽取为全站唯一实现：assets/js/num-cny.js
+// （由 includes/header.php 在页面 head 里引入，本页不再内联定义，避免多份副本算出不同结果）
 printData.total_amount_cn = numToCny(<?= $quote['total_amount'] ?>);
 
 // 商品图片：首屏不加载、不编码，只在打印/导出时按需转 dataURL

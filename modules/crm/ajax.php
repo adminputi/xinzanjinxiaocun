@@ -54,7 +54,8 @@ if ($action === 'add_followup') {
     $content = trim($_POST['content'] ?? '');
     $followType = $_POST['follow_type'] ?? '电话';
     $result = $_POST['result'] ?? '待跟进';
-    $nextFollow = $_POST['next_follow_at'] ?? null;
+    $nextFollow = normalize_datetime_input($_POST['next_follow_at'] ?? '');
+    if ($nextFollow === false) json_response(false, '计划下次跟进时间格式不正确');
     $userId = get_user_id();
     if (!$customerId) json_response(false, '缺少客户ID');
     if (!$content) json_response(false, '请填写跟进内容');
@@ -99,7 +100,8 @@ if ($action === 'update_followup') {
     $content = trim($_POST['content'] ?? '');
     $followType = $_POST['follow_type'] ?? '电话';
     $result = $_POST['result'] ?? '待跟进';
-    $nextFollow = $_POST['next_follow_at'] ?? null;
+    $nextFollow = normalize_datetime_input($_POST['next_follow_at'] ?? '');
+    if ($nextFollow === false) json_response(false, '计划下次跟进时间格式不正确');
     $removeAttachment = intval($_POST['remove_attachment'] ?? 0) === 1;
     $userId = get_user_id();
 
@@ -440,20 +442,26 @@ if ($action === 'get_users') {
 // ========== 跟进提醒（检查当前用户今日需跟进的客户）==========
 if ($action === 'check_reminders') {
     $userId = get_user_id();
+    // 提醒范围：最新一条跟进的「计划下次跟进」在今天之内或已逾期（到明天 0 点之前）
+    // 已成交的不再提醒。到点的（due=1）排在前面，弹窗据此变红。
     $stmt = $pdo->prepare("
-        SELECT c.id, c.name,
-            (SELECT next_follow_at FROM customer_followups 
-             WHERE customer_id=c.id 
-             ORDER BY created_at DESC LIMIT 1) as next_follow_at
+        SELECT c.id, c.name, nf.next_follow_at
         FROM customers c
+        JOIN customer_followups nf ON nf.id = (
+            SELECT id FROM customer_followups WHERE customer_id = c.id ORDER BY created_at DESC LIMIT 1
+        )
         WHERE c.owner_id = ? AND c.in_pool = 0 AND c.status = 1
-          AND (SELECT next_follow_at FROM customer_followups 
-               WHERE customer_id=c.id 
-               ORDER BY created_at DESC LIMIT 1) <= CURDATE()
-        ORDER BY next_follow_at DESC
+          AND nf.next_follow_at IS NOT NULL
+          AND nf.next_follow_at < DATE_ADD(CURDATE(), INTERVAL 1 DAY)
+          AND nf.result != '已成交'
+        ORDER BY nf.next_follow_at ASC
     ");
     $stmt->execute([$userId]);
     $data = $stmt->fetchAll();
+    foreach ($data as &$row) {
+        $row['due'] = is_follow_due($row['next_follow_at']) ? 1 : 0;
+    }
+    unset($row);
     json_response(true, '', $data);
 }
 

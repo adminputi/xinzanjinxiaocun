@@ -107,13 +107,27 @@ $intentionData = $pdo->query("SELECT COALESCE(intention,'未知') as intention, 
 // 业务经理客户排名（仅已归属的）
 $ownerRank = $pdo->query("SELECT u.real_name, COUNT(*) as cnt FROM customers c JOIN users u ON c.owner_id=u.id WHERE c.status=1 AND c.in_pool=0 GROUP BY c.owner_id ORDER BY cnt DESC LIMIT 10")->fetchAll();
 
-// 今日待跟进列表（计划跟进日期为今天）
-$todayFollowups = $pdo->query("SELECT c.name as customer_name, c.id as customer_id, u.real_name as owner_name, f.content, f.follow_type, f.next_follow_at
+// 待跟进列表：今日计划 + 逾期未跟进（与跟进记录页「待跟进」Tab 同口径，用公共 SQL 片段）
+// 排序 next_follow_at ASC → 逾期最久的排最前
+$stToday = $pdo->prepare("SELECT c.name as customer_name, c.id as customer_id, u.real_name as owner_name, f.content, f.follow_type, f.next_follow_at,
+    (SELECT MIN(f2.created_at) FROM customer_followups f2
+      WHERE f2.customer_id = f.customer_id AND f2.created_at > f.next_follow_at) AS done_after_at
     FROM customer_followups f 
     JOIN customers c ON f.customer_id=c.id 
     JOIN users u ON f.user_id=u.id
-    WHERE DATE(f.next_follow_at)=CURDATE() AND c.status=1
-    ORDER BY f.next_follow_at ASC LIMIT 10")->fetchAll();
+    WHERE c.status=1" . sql_follow_pending() . "
+    ORDER BY f.next_follow_at ASC LIMIT 10");
+$stToday->execute([follow_tomorrow_start()]);
+$todayFollowups = $stToday->fetchAll();
+
+// 待跟进总数（含逾期），单独统计，不受上面 LIMIT 10 影响
+$stPendTotal = $pdo->prepare("SELECT COUNT(*) FROM customer_followups f JOIN customers c ON f.customer_id=c.id WHERE c.status=1" . sql_follow_pending());
+$stPendTotal->execute([follow_tomorrow_start()]);
+$pendingTotal = (int)$stPendTotal->fetchColumn();
+
+$stPendOverdue = $pdo->prepare("SELECT COUNT(*) FROM customer_followups f JOIN customers c ON f.customer_id=c.id WHERE c.status=1" . sql_follow_pending() . " AND f.next_follow_at <= ?");
+$stPendOverdue->execute([follow_tomorrow_start(), date('Y-m-d H:i:s')]);
+$pendingOverdue = (int)$stPendOverdue->fetchColumn();
 
 // 近30天新增客户趋势
 $newCustTrend = $pdo->query("SELECT DATE(created_at) as dt, COUNT(*) as cnt FROM customers WHERE status=1 AND created_at >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) GROUP BY DATE(created_at) ORDER BY dt")->fetchAll();
@@ -396,9 +410,9 @@ $followTrend = $pdo->query("SELECT DATE(created_at) as dt, COUNT(*) as cnt FROM 
         <div class="stat-card">
             <div class="stat-icon red"><i class="fa-solid fa-clock"></i></div>
             <div class="stat-content">
-                <div class="stat-label">今日待跟进</div>
-                <div class="stat-value"><?= count($todayFollowups) ?></div>
-                <div class="stat-sub">计划今日跟进的客户</div>
+                <div class="stat-label">待跟进</div>
+                <div class="stat-value"><?= $pendingTotal ?></div>
+                <div class="stat-sub"><?= $pendingOverdue > 0 ? "含逾期 {$pendingOverdue} 条" : '今日计划 + 逾期未跟进' ?></div>
             </div>
         </div>
     </div>
@@ -473,26 +487,29 @@ $followTrend = $pdo->query("SELECT DATE(created_at) as dt, COUNT(*) as cnt FROM 
 
     <div class="card">
         <div class="card-header">
-            <h3 class="card-title"><i class="fa-solid fa-calendar-check" style="color:var(--primary)"></i> 今日待跟进客户</h3>
-            <a href="modules/crm/followups.php" class="btn btn-sm btn-outline">全部跟进</a>
+            <h3 class="card-title"><i class="fa-solid fa-calendar-check" style="color:var(--primary)"></i> 待跟进客户（含逾期）</h3>
+            <a href="modules/crm/followups.php?tab=today_pending" class="btn btn-sm btn-outline">全部跟进</a>
         </div>
         <div class="card-body" style="padding:0;">
             <?php if ($todayFollowups): ?>
             <table>
-                <thead><tr><th>客户</th><th>负责人</th><th>方式</th><th>内容</th></tr></thead>
+                <thead><tr><th>客户</th><th>负责人</th><th>方式</th><th>计划时间</th><th>内容</th></tr></thead>
                 <tbody>
                     <?php foreach ($todayFollowups as $fu): ?>
-                    <tr>
+                    <?php $fuSt = follow_plan_status($fu['next_follow_at'], null, $fu['done_after_at'] ?? null); ?>
+                    <?php $fuOverdue = $fuSt['state'] === 'overdue'; ?>
+                    <tr<?=$fuOverdue?' style="background:rgba(220,53,69,.07);"':''?>>
                         <td><a href="modules/crm/customer_detail.php?id=<?= $fu['customer_id'] ?>"><?= htmlspecialchars(mb_substr($fu['customer_name'],0,8)) ?></a></td>
                         <td><?= htmlspecialchars($fu['owner_name']) ?></td>
                         <td><span class="badge badge-info"><?= $fu['follow_type'] ?></span></td>
+                        <td style="font-size:12px;white-space:nowrap;color:<?=$fuOverdue?'var(--danger);font-weight:600':'var(--gray-500)'?>;"><?=format_datetime_short($fu['next_follow_at'])?><?=$fuOverdue?($fuSt['days']>0?' 逾期'.$fuSt['days'].'天':' 已到点'):''?></td>
                         <td style="font-size:12px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="<?= htmlspecialchars($fu['content']) ?>"><?= htmlspecialchars(mb_substr($fu['content'],0,20)) ?></td>
                     </tr>
                     <?php endforeach; ?>
                 </tbody>
             </table>
             <?php else: ?>
-            <div class="empty-state"><i class="fa-solid fa-check-circle" style="color:var(--success)"></i><p>今日无待跟进客户</p></div>
+            <div class="empty-state"><i class="fa-solid fa-check-circle" style="color:var(--success)"></i><p>暂无待跟进客户</p></div>
             <?php endif; ?>
         </div>
     </div>

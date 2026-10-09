@@ -29,12 +29,18 @@ if (!$isAdmin) {
     $params[] = $userId;
 }
 
+// 待跟进（今日计划 + 逾期未跟进）的统一条件，列表与各Tab计数共用，避免两处口径漂移
+// 口径：有计划时间 → 计划时间在明天 0 点之前（今天全天 + 已逾期）→ 排除已成交
+//      → 且该计划时间点之后客户没有再跟进过（补过跟进的不再算待跟进）
+$tomorrowStart = follow_tomorrow_start();
+$pendingCond = sql_follow_pending();
+// 每个客户只显示最后一条跟进记录（记录多了列表会乱），完整历史在客户详情里看
+$latestCond = sql_follow_latest();
+
 // Tab过滤
 if ($tab === 'today_pending') {
-    // 今日待跟进：计划今天跟进的
-    $where .= " AND f.next_follow_at >= ? AND f.next_follow_at < ? AND f.result != '已成交'";
-    $params[] = $today . ' 00:00:00';
-    $params[] = date('Y-m-d', strtotime('+1 day')) . ' 00:00:00';
+    $where .= $pendingCond;
+    $params[] = $tomorrowStart;
 } elseif ($tab === 'today_done') {
     // 今日已跟进：今天添加的
     $where .= " AND f.created_at >= ? AND f.created_at < ?";
@@ -47,19 +53,30 @@ if ($search) {
     $params = array_merge($params, ["%$search%", "%$search%", "%$search%"]);
 }
 
+// 所有 Tab 都按客户去重：一个客户一行，显示其最新一条跟进
+$where .= $latestCond;
+
 $countStmt = $pdo->prepare("SELECT COUNT(*) FROM customer_followups f LEFT JOIN customers c ON f.customer_id=c.id WHERE 1=1 $where");
 $countStmt->execute($params);
 $total = $countStmt->fetchColumn();
 $pages = ceil($total / $perPage);
 
+// 今日待跟进按计划时间升序（逾期的排最前），其余按记录时间倒序
+$orderBy = ($tab === 'today_pending') ? 'f.next_follow_at ASC' : 'f.created_at DESC';
+
+// done_after_at：本条记录的「计划跟进时间」之后，该客户最早的跟进时间
+// 有值 = 计划逾期后补过跟进（不再标红）；NULL = 一次都没跟进（真逾期）
 $sql = "SELECT f.*, c.name as customer_name, c.phone as customer_phone, c.in_pool, IFNULL(c.intended_product,'') as intended_product,
-    u.real_name as user_name, ue.real_name as updated_by_name
+    u.real_name as user_name, ue.real_name as updated_by_name,
+    (SELECT MIN(f2.created_at) FROM customer_followups f2
+      WHERE f2.customer_id = f.customer_id AND f2.created_at > f.next_follow_at) AS done_after_at,
+    (SELECT COUNT(*) FROM customer_followups f4 WHERE f4.customer_id = f.customer_id) AS follow_cnt
     FROM customer_followups f
     LEFT JOIN customers c ON f.customer_id=c.id
     LEFT JOIN users u ON f.user_id=u.id
     LEFT JOIN users ue ON f.updated_by=ue.id
     WHERE 1=1 $where
-    ORDER BY f.created_at DESC LIMIT $offset,$perPage";
+    ORDER BY $orderBy LIMIT $offset,$perPage";
 $stmt = $pdo->prepare($sql);
 $stmt->execute($params);
 $list = $stmt->fetchAll();
@@ -72,13 +89,18 @@ $baseWhere = '';
 $baseParams = [];
 if (!$isAdmin) { $baseWhere .= " AND c.owner_id=?"; $baseParams[] = $userId; }
 
-$countAll = $pdo->prepare("SELECT COUNT(*) FROM customer_followups f LEFT JOIN customers c ON f.customer_id=c.id WHERE 1=1 $baseWhere");
+$countAll = $pdo->prepare("SELECT COUNT(*) FROM customer_followups f LEFT JOIN customers c ON f.customer_id=c.id WHERE 1=1 $baseWhere $latestCond");
 $countAll->execute($baseParams);
 $tabAllCount = $countAll->fetchColumn();
 
-$countPending = $pdo->prepare("SELECT COUNT(*) FROM customer_followups f LEFT JOIN customers c ON f.customer_id=c.id WHERE 1=1 $baseWhere AND f.next_follow_at >= ? AND f.next_follow_at < ? AND f.result != '已成交'");
-$countPending->execute(array_merge($baseParams, [$today.' 00:00:00', date('Y-m-d',strtotime('+1 day')).' 00:00:00']));
+$countPending = $pdo->prepare("SELECT COUNT(*) FROM customer_followups f LEFT JOIN customers c ON f.customer_id=c.id WHERE 1=1 $baseWhere $pendingCond $latestCond");
+$countPending->execute(array_merge($baseParams, [$tomorrowStart]));
 $tabPendingCount = $countPending->fetchColumn();
+
+// 待跟进里「已逾期」（计划时间已过且没跟进）的条数，用于提示行拆分显示
+$countOverdue = $pdo->prepare("SELECT COUNT(*) FROM customer_followups f LEFT JOIN customers c ON f.customer_id=c.id WHERE 1=1 $baseWhere $pendingCond $latestCond AND f.next_follow_at <= ?");
+$countOverdue->execute(array_merge($baseParams, [$tomorrowStart, date('Y-m-d H:i:s')]));
+$tabOverdueCount = (int)$countOverdue->fetchColumn();
 
 $countDone = $pdo->prepare("SELECT COUNT(*) FROM customer_followups f LEFT JOIN customers c ON f.customer_id=c.id WHERE 1=1 $baseWhere AND f.created_at >= ? AND f.created_at < ?");
 $countDone->execute(array_merge($baseParams, [$today.' 00:00:00', date('Y-m-d',strtotime('+1 day')).' 00:00:00']));
@@ -102,15 +124,15 @@ $tabDoneCount = $countDone->fetchColumn();
 </style>
 
 <div class="tab-pills">
-    <a href="?tab=all" class="<?=$tab==='all'?'active':''?>">
-        <i class="fa-solid fa-list tab-icon"></i> 全部记录
+    <a href="?tab=all" class="<?=$tab==='all'?'active':''?>" title="每个客户只显示最新一条跟进记录，完整历史在客户详情里看">
+        <i class="fa-solid fa-list tab-icon"></i> 全部客户
         <span class="tab-count"><?=$tabAllCount?></span>
     </a>
-    <a href="?tab=today_pending" class="<?=$tab==='today_pending'?'active':''?>">
-        <i class="fa-solid fa-clock tab-icon"></i> 今日待跟进
+    <a href="?tab=today_pending" class="<?=$tab==='today_pending'?'active':''?>" title="今日计划跟进 + 逾期未跟进（补过跟进的不再计入）">
+        <i class="fa-solid fa-clock tab-icon"></i> 待跟进
         <span class="tab-count"><?=$tabPendingCount?></span>
     </a>
-    <a href="?tab=today_done" class="<?=$tab==='today_done'?'active':''?>">
+    <a href="?tab=today_done" class="<?=$tab==='today_done'?'active':''?>" title="今天新增的跟进记录，同样每个客户只显示最新一条">
         <i class="fa-solid fa-circle-check tab-icon"></i> 今日已跟进
         <span class="tab-count"><?=$tabDoneCount?></span>
     </a>
@@ -124,6 +146,17 @@ $tabDoneCount = $countDone->fetchColumn();
 </form>
 
 <div class="card"><div class="card-body" style="padding:0;">
+<?php if ($tab === 'today_pending'): ?>
+<div style="padding:10px 16px;font-size:13px;color:var(--gray-600);border-bottom:1px solid var(--gray-200);">
+    <?php if (!$total): ?>
+    暂无待跟进记录 —— 今日计划与逾期未跟进的都会出现在这里
+    <?php elseif ($search): ?>
+    匹配到 <b><?=$total?></b> 条待跟进（按计划时间升序，逾期排最前）
+    <?php else: ?>
+    共 <b><?=$total?></b> 条待跟进：其中 <b style="color:var(--danger);">逾期未跟进 <?=$tabOverdueCount?> 条</b>，今日计划 <?=$total - $tabOverdueCount?> 条（按计划时间升序，逾期排最前）
+    <?php endif; ?>
+</div>
+<?php endif; ?>
 <div class="table-container">
 <table>
 <thead><tr>
@@ -131,9 +164,13 @@ $tabDoneCount = $countDone->fetchColumn();
 </tr></thead>
 <tbody>
 <?php if ($list): foreach ($list as $f): ?>
-<tr>
+<?php $planSt = follow_plan_status($f['next_follow_at'], $f['result'], $f['done_after_at'] ?? null); ?>
+<tr<?=$planSt['state']==='overdue'?' style="background:rgba(220,53,69,.07);"':''?>>
     <td><i class="fa-solid <?=$f['in_pool']?'fa-water':'fa-user'?>" style="color:<?=$f['in_pool']?'var(--warning)':'var(--gray-400)';?>;margin-right:4px;" title="<?=$f['in_pool']?'公海':'私有'?>"></i>
         <a href="customer_detail.php?id=<?=$f['customer_id']?>" style="color:var(--primary);font-weight:500;"><?=htmlspecialchars($f['customer_name'])?></a>
+        <?php if (intval($f['follow_cnt'] ?? 1) > 1): ?>
+        <div style="font-size:11px;color:var(--gray-400);">共<?=intval($f['follow_cnt'])?>条跟进，此处显示最新一条</div>
+        <?php endif; ?>
     </td>
     <td><?=htmlspecialchars($f['customer_phone'])?:'-'?></td>
     <td><?php $prod=$f['intended_product']??''; if($prod): ?><span title="<?=htmlspecialchars($prod)?>" style="cursor:help;"><?=htmlspecialchars(mb_strlen($prod)>8?mb_substr($prod,0,8).'...':$prod)?></span><?php else: ?>-<?php endif; ?></td>
@@ -145,7 +182,13 @@ $tabDoneCount = $countDone->fetchColumn();
     </td>
     <td><span class="badge badge-<?=$resultLabels[$f['result']]??'gray'?>"><?=$f['result']?></span></td>
     <td><?=htmlspecialchars($f['user_name'])?:'-'?></td>
-    <td><?=$f['next_follow_at']?date('Y-m-d',strtotime($f['next_follow_at'])):'-'?></td>
+    <td><?php if ($f['next_follow_at']): ?><?=format_datetime_short($f['next_follow_at'])?>
+        <?php if ($planSt['state'] === 'overdue'): ?>
+        <div style="font-size:11px;color:var(--danger);font-weight:600;">已逾期<?=$planSt['days']>0?$planSt['days'].'天':''?></div>
+        <?php elseif ($planSt['state'] === 'late_done'): ?>
+        <div style="font-size:11px;color:var(--gray-500);" title="实际跟进：<?=htmlspecialchars($planSt['done_at'])?>"><i class="fa-solid fa-circle-check" style="margin-right:2px;"></i><?=$planSt['days']>0?'逾期'.$planSt['days'].'天后跟进':'当天已跟进'?></div>
+        <?php endif; ?>
+    <?php else: ?>-<?php endif; ?></td>
     <td><?php if ($f['attachment']): $an = $f['attachment_name'] ?? ''; ?><a href="../../<?=htmlspecialchars($f['attachment'])?>" target="_blank" download="<?=htmlspecialchars($an)?>" title="<?=htmlspecialchars($an ?: '查看附件')?>">📎 <?=htmlspecialchars($an ? (mb_strlen($an) > 12 ? mb_substr($an, 0, 12) . '...' : $an) : '附件')?></a><?php else: ?>-<?php endif; ?></td>
     <td><?=date('m-d H:i',strtotime($f['created_at']))?></td>
     <td>
@@ -217,7 +260,13 @@ $tabDoneCount = $countDone->fetchColumn();
         <div class="form-row">
             <div class="form-group">
                 <label class="form-label">计划下次跟进</label>
-                <input type="date" name="next_follow_at" id="efNext" class="form-control">
+                <input type="datetime-local" name="next_follow_at" id="efNext" class="form-control">
+                <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;">
+                    <button type="button" class="btn btn-sm btn-outline" onclick="setNextFollowQuick('[name=next_follow_at]',1)">明天 09:00</button>
+                    <button type="button" class="btn btn-sm btn-outline" onclick="setNextFollowQuick('[name=next_follow_at]',7)">一周后 09:00</button>
+                    <button type="button" class="btn btn-sm btn-outline" onclick="setNextFollowQuick('[name=next_follow_at]',null)">清除</button>
+                </div>
+                <small style="color:var(--gray-500);">留空表示暂不计划下次跟进</small>
             </div>
             <div class="form-group">
                 <label class="form-label">附件（留空则不替换）</label>
@@ -258,7 +307,7 @@ function viewFollowup(id){
             html += '<tr><td style="color:var(--gray-500);">跟进结果</td><td>'+escHtml(f.result||'')+'</td></tr>';
             html += '<tr><td style="color:var(--gray-500);">跟进人</td><td>'+escHtml(f.user_name||'')+'</td></tr>';
             html += '<tr><td style="color:var(--gray-500);">跟进时间</td><td>'+escHtml(f.created_at||'')+'</td></tr>';
-            html += '<tr><td style="color:var(--gray-500);">计划下次</td><td>'+escHtml(f.next_follow_at||'无')+'</td></tr>';
+            html += '<tr><td style="color:var(--gray-500);">计划下次</td><td>'+escHtml(f.next_follow_at?fmtPlanFollow(f.next_follow_at):'无')+'</td></tr>';
             html += '<tr><td style="color:var(--gray-500);">跟进内容</td><td style="white-space:pre-wrap;">'+escHtml(f.content||'')+'</td></tr>';
             if(f.attachment){html += '<tr><td style="color:var(--gray-500);">附件</td><td><a href="../../'+escHtml(f.attachment)+'" target="_blank" download="'+escHtml(f.attachment_name||'')+'" title="'+escHtml(f.attachment_name||'')+'">📎 '+escHtml(f.attachment_name||'查看附件')+'</a></td></tr>';}
             html += '</table>';
@@ -316,7 +365,7 @@ function editFollowup(id){
         document.getElementById('efType').value = f.follow_type || '电话';
         document.getElementById('efResult').value = f.result || '待跟进';
         document.getElementById('efContent').value = f.content || '';
-        document.getElementById('efNext').value = f.next_follow_at ? String(f.next_follow_at).substring(0,10) : '';
+        document.getElementById('efNext').value = toDatetimeLocal(f.next_follow_at);
         document.getElementById('efAttachment').value = '';
         var rm = document.getElementById('efRemove'); rm.checked = false;
         var rmWrap = document.getElementById('efRemoveWrap');

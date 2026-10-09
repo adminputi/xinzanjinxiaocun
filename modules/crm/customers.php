@@ -140,7 +140,7 @@ $owners = $pdo->query("SELECT id, real_name FROM users WHERE status=1 ORDER BY r
     <td><?=htmlspecialchars($item['owner_name']?:'-')?></td>
     <td><?=$item['followup_count']?>次</td>
     <td><?=($item['developed_at'] ?? '') ?: '--'?></td>
-    <td><?=$item['last_followed_at']?:'--'?></td>
+    <td><?=$item['last_followed_at']?format_datetime_short($item['last_followed_at']):'--'?></td>
     <td>
         <button class="btn btn-sm btn-outline" onclick="editCustomer(<?=$item['id']?>)" title="编辑"><i class="fa-solid fa-pen"></i></button>
         <button class="btn btn-sm btn-primary" onclick="showFollowupModal(<?=$item['id']?>,'<?=htmlspecialchars(addslashes($item['name']))?>')" title="跟进"><i class="fa-solid fa-comment-dots"></i></button>
@@ -242,7 +242,13 @@ $owners = $pdo->query("SELECT id, real_name FROM users WHERE status=1 ORDER BY r
             <small style="color:var(--gray-500);">支持 JPG/PNG/GIF/WEBP 图片、Word/Excel/PPT、PDF、RAR/ZIP，单个最大 50MB</small>
         </div>
         <div class="form-group"><label class="form-label">计划下次跟进</label>
-            <input type="date" name="next_follow_at" class="form-control">
+            <input type="datetime-local" name="next_follow_at" class="form-control">
+            <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;">
+                <button type="button" class="btn btn-sm btn-outline" onclick="setNextFollowQuick(this.closest('.form-group').querySelector('[name=next_follow_at]'),1)">明天 09:00</button>
+                <button type="button" class="btn btn-sm btn-outline" onclick="setNextFollowQuick(this.closest('.form-group').querySelector('[name=next_follow_at]'),7)">一周后 09:00</button>
+                <button type="button" class="btn btn-sm btn-outline" onclick="setNextFollowQuick(this.closest('.form-group').querySelector('[name=next_follow_at]'),null)">清除</button>
+            </div>
+            <small style="color:var(--gray-500);">留空表示暂不计划下次跟进</small>
         </div>
     </div>
 </div>

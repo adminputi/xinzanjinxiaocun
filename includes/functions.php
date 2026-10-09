@@ -809,6 +809,120 @@ function format_date($date, $format = 'Y-m-d H:i:s') {
 }
 
 /**
+ * 日期时间显示：时间部分为 00:00 时只显示日期
+ *
+ * 用于「计划下次跟进」「最后跟进」这类字段——历史上只能选到日，库里存的是 Y-m-d 00:00:00，
+ * 精确到分之后若直接显示会变成「10-15 00:00」，看着像凌晨跟进。这里做特判，不动历史数据。
+ */
+function format_datetime_short($date) {
+    if (!$date || $date === '0000-00-00 00:00:00') return '';
+    $ts = strtotime($date);
+    if (!$ts) return '';
+    return date('H:i', $ts) === '00:00' ? date('Y-m-d', $ts) : date('Y-m-d H:i', $ts);
+}
+
+/**
+ * 规范化前端提交的时间字符串
+ *
+ * <input type="datetime-local"> 提交的是 Y-m-dTH:i（T 分隔、不带秒）；
+ * 不支持该类型的浏览器会退化成文本框，用户手填的可能是 Y-m-d H:i 或带秒。
+ * 统一转成 Y-m-d H:i:s 再入库。
+ *
+ * @return string|null|false 正常返回 Y-m-d H:i:s；空字符串返回 null（表示不计划）；格式非法返回 false
+ */
+function normalize_datetime_input($value) {
+    $v = trim((string)$value);
+    if ($v === '') return null;
+    $v = str_replace('T', ' ', $v);
+    if (preg_match('/^(\d{4}-\d{2}-\d{2})\s+(\d{2}):(\d{2})(?::(\d{2}))?$/', $v, $m)) {
+        return sprintf('%s %s:%s:%s', $m[1], $m[2], $m[3], isset($m[4]) && $m[4] !== '' ? $m[4] : '00');
+    }
+    return false;
+}
+
+/**
+ * 判断计划跟进时间是否已到点（含逾期）
+ */
+function is_follow_due($nextFollowAt) {
+    if (!$nextFollowAt) return false;
+    $ts = strtotime($nextFollowAt);
+    return $ts ? $ts <= time() : false;
+}
+
+/**
+ * 计划跟进的状态判定（跟进记录列表 / 客户详情时间线 / 首页待跟进 共用）
+ *
+ * 规则（2026-10-09 调整，解决「补了跟进还一直标红」）：
+ * - 计划时间未到                → pending    未到期，正常显示
+ * - 计划已过 + 之后没再跟进过    → overdue    红色「已逾期」
+ * - 计划已过 + 之后补过跟进      → late_done  不标红，灰色标注「逾期X天后跟进 / 当天已跟进」
+ * - 无计划时间、或已成交         → none       不显示任何标记
+ *
+ * @param string|null $nextFollowAt 计划下次跟进时间
+ * @param string|null $result       跟进结果
+ * @param string|null $doneAfterAt  该计划时间点之后该客户最早的跟进时间（由 SQL 子查询给出；null = 之后没跟进过）
+ * @return array{state:string,done_at:?string,days:int} state: none|pending|overdue|late_done
+ *              days 为自然日差：overdue=逾期天数，late_done=计划日晚多少天才跟进
+ */
+function follow_plan_status($nextFollowAt, $result = null, $doneAfterAt = null) {
+    $none = ['state' => 'none', 'done_at' => null, 'days' => 0];
+    if (empty($nextFollowAt)) return $none;
+    if ($result === '已成交') return $none;
+    $ts = strtotime($nextFollowAt);
+    if (!$ts) return $none;
+
+    // 自然日差（只比日期，不受具体时分影响）
+    $daysBetween = function ($fromTs, $toTs) {
+        return (int)floor((strtotime(date('Y-m-d', $toTs)) - strtotime(date('Y-m-d', $fromTs))) / 86400);
+    };
+
+    if ($ts > time()) {
+        return ['state' => 'pending', 'done_at' => null, 'days' => 0];
+    }
+    if (!empty($doneAfterAt)) {
+        return [
+            'state'   => 'late_done',
+            'done_at' => $doneAfterAt,
+            'days'    => max(0, $daysBetween($ts, strtotime($doneAfterAt))),
+        ];
+    }
+    return ['state' => 'overdue', 'done_at' => null, 'days' => max(0, $daysBetween($ts, time()))];
+}
+
+/**
+ * SQL 片段：待跟进（今日计划 + 逾期未跟进）的筛选条件
+ * followups.php 列表/计数 与 dashboard.php 看板共用同一口径，避免两处漂移
+ *
+ * 紧跟 **1 个**绑定参数：明天 0 点，用 follow_tomorrow_start() 取
+ *
+ * @param string $alias customer_followups 的别名
+ */
+function sql_follow_pending($alias = 'f') {
+    return " AND {$alias}.next_follow_at IS NOT NULL"
+        . " AND {$alias}.next_follow_at < ?"
+        . " AND {$alias}.result != '已成交'"
+        . " AND NOT EXISTS (SELECT 1 FROM customer_followups f2"
+        .                  " WHERE f2.customer_id = {$alias}.customer_id AND f2.created_at > {$alias}.next_follow_at)";
+}
+
+/** sql_follow_pending() 要绑定的时间：明天 0 点（今天全天 + 已逾期都 < 它） */
+function follow_tomorrow_start() {
+    return date('Y-m-d', strtotime('+1 day')) . ' 00:00:00';
+}
+
+/**
+ * SQL 片段：只取该客户「最后一条」跟进记录（跟进记录列表按客户去重）
+ * 无绑定参数。同客户同时间插入的多条按 id 取最大那条
+ *
+ * @param string $alias customer_followups 的别名
+ */
+function sql_follow_latest($alias = 'f') {
+    return " AND {$alias}.id = (SELECT f3.id FROM customer_followups f3"
+        .                     " WHERE f3.customer_id = {$alias}.customer_id"
+        .                     " ORDER BY f3.created_at DESC, f3.id DESC LIMIT 1)";
+}
+
+/**
  * 获取库存数量
  */
 function get_stock($productId, $warehouseId = 0) {

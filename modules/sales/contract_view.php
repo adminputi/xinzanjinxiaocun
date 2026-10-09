@@ -399,57 +399,9 @@ require_once __DIR__ . '/../../includes/header.php';
 <div id="printContent" style="display:none;"></div>
 
 <script>
-// 数字转中文大写
-// 注意：numToCny 目前由各单据页面各自内联定义（quote_view/order_view/outstock_view/print_tpl/contract_form），
-// 并没有抽到 assets/js 公共库，所以本页必须自带一份，
-// 否则打印/导出时会因函数未定义抛错，导致整个渲染流程中断（{total_amount_cn} 也无法替换）。
-function numToCny(num) {
-    if (isNaN(num) || num === '' || num === null) return '零元整';
-    var n = Number(num);
-    if (n >= 1e12) return '金额超出范围';
-    if (n === 0) return '零元整';
-    var digit = ['零','壹','贰','叁','肆','伍','陆','柒','捌','玖'];
-    var unit = ['','拾','佰','仟'];
-    var bigUnit = ['','万','亿'];
-    var decUnit = ['角','分'];
-    var integerPart = Math.floor(n);
-    var decimalPart = Math.round((n - integerPart) * 100);
-    var result = '';
-    var zeroFlag = false;
-    if (integerPart === 0) result = '零';
-    else {
-        var strInt = String(integerPart);
-        var len = strInt.length;
-        for (var i = 0; i < len; i++) {
-            var d = parseInt(strInt[i]);
-            var pos = len - i - 1;
-            var unitPos = pos % 4;
-            var bigPos = Math.floor(pos / 4);
-            if (d === 0) { zeroFlag = true; }
-            else {
-                if (zeroFlag && result !== '') result += '零';
-                zeroFlag = false;
-                result += digit[d];
-                if (unitPos > 0) result += unit[unitPos];
-            }
-            if (unitPos === 0 && bigPos > 0 && !zeroFlag) result += bigUnit[bigPos];
-            else if (unitPos === 0 && bigPos > 0 && zeroFlag) {
-                var hasNonZero = false;
-                for (var j = i - unitPos; j <= i; j++) { if (parseInt(strInt[j]) !== 0) hasNonZero = true; }
-                if (hasNonZero) result += bigUnit[bigPos];
-            }
-        }
-    }
-    result += '元';
-    if (decimalPart === 0) result += '整';
-    else {
-        var jiao = Math.floor(decimalPart / 10);
-        var fen = decimalPart % 10;
-        if (jiao > 0) result += digit[jiao] + '角';
-        if (fen > 0) result += digit[fen] + '分';
-    }
-    return result;
-}
+// numToCny 已抽取为全站唯一实现：assets/js/num-cny.js
+// （由 includes/header.php 在页面 head 里引入，本页不再内联定义，避免多份副本算出不同结果）
+// 打印/导出依赖这个函数替换 {total_amount_cn}，缺了会导致渲染流程中断
 
 var printData = {
     contract_no: '<?= js_escape($contract['contract_no']) ?>',
@@ -639,7 +591,7 @@ var PRINT_CSS = '<style>body{font-family:SimSun,Arial;padding:10px;color:#000;ba
     + 'table th{font-weight:bold;}'
     // 合同正文的表格左对齐（甲乙双方表、签章区）。
     // 必须靠 `.contract-doc` 这类容器规则来兜底：模板内容存在数据库里，
-    // 给模板加内联样式对“已入库的旧模板”不生效，只有 CSS 能立刻覆盖全部历史模板。
+    // 给模板加内联样式对"已入库的旧模板"不生效，只有 CSS 能立刻覆盖全部历史模板。
     // 特异性：.contract-doc table td (0,0,1,2) > table td (0,0,0,2)，能压过上面的居中
     + '.contract-doc table td{text-align:left;}'
     // 附件是整份报价单，恢复单据惯用的居中排版（特异性更高，覆盖上一条）

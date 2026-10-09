@@ -731,4 +731,33 @@
             buildSearchable(sel);
         });
     };
+
+    // 计划下次跟进：快捷填充（days 天后 09:00；days 为 null 时清空）
+    // 三个入口共用：客户列表跟进弹窗 / 客户详情页 / 跟进记录编辑弹窗
+    window.setNextFollowQuick = function(target, days) {
+        var el = (typeof target === 'string') ? document.querySelector(target) : target;
+        if (!el) return;
+        if (days === null || days === undefined || days === '') { el.value = ''; return; }
+        var d = new Date();
+        d.setDate(d.getDate() + parseInt(days, 10));
+        var p = function(n) { return (n < 10 ? '0' : '') + n; };
+        el.value = d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + 'T09:00';
+    };
+
+    // 计划下次跟进：数据库值 'Y-m-d H:i:s' -> datetime-local 需要的 'Y-m-dTH:i'
+    // 不支持 datetime-local 的浏览器会退化成文本框，此时空格分隔的值用户也能看懂
+    window.toDatetimeLocal = function(val) {
+        if (!val) return '';
+        return String(val).substring(0, 16).replace(' ', 'T');
+    };
+
+    // 计划下次跟进：显示用。历史数据只有日期（时间 00:00），只显示日期，避免看着像凌晨跟进
+    window.fmtPlanFollow = function(val) {
+        if (!val) return '';
+        var s = String(val).replace('T', ' ');
+        var d = s.substring(0, 10);
+        var t = s.substring(11, 16);
+        if (!t || t === '00:00') return d;
+        return d + ' ' + t;
+    };
 })();

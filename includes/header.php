@@ -41,6 +41,8 @@ $pageTitle = get_page_name($_SERVER['SCRIPT_NAME']);
     <title><?= $siteDisplayName ?></title>
     <link rel="stylesheet" href="<?= $basePath ?>assets/css/style.css">
     <link rel="stylesheet" href="<?= $basePath ?>assets/fontawesome/css/all.min.css">
+    <?php // 金额转中文大写：全站唯一实现。必须在页面内联脚本之前加载 —— 单据页面有顶层直接调用（如 printData.total_amount_cn = numToCny(...)），放 footer 会报函数未定义 ?>
+    <script src="<?= $basePath ?>assets/js/num-cny.js"></script>
 </head>
 <body>
 <div class="app-container">

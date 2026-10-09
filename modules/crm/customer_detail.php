@@ -31,7 +31,10 @@ $arRows = get_ar_by_customer($id);
 $cust['ar_balance'] = $arRows ? $arRows[0]['balance'] : 0;
 
 // 跟进记录
-$followups = $pdo->prepare("SELECT f.*, u.real_name as user_name, ue.real_name as updated_by_name FROM customer_followups f LEFT JOIN users u ON f.user_id=u.id LEFT JOIN users ue ON f.updated_by=ue.id WHERE f.customer_id=? ORDER BY f.created_at DESC");
+$followups = $pdo->prepare("SELECT f.*, u.real_name as user_name, ue.real_name as updated_by_name,
+    (SELECT MIN(f2.created_at) FROM customer_followups f2
+      WHERE f2.customer_id = f.customer_id AND f2.created_at > f.next_follow_at) AS done_after_at
+    FROM customer_followups f LEFT JOIN users u ON f.user_id=u.id LEFT JOIN users ue ON f.updated_by=ue.id WHERE f.customer_id=? ORDER BY f.created_at DESC");
 $followups->execute([$id]);
 $followupList = $followups->fetchAll();
 
@@ -88,7 +91,7 @@ $statusBadges = ['draft'=>'warning','confirmed'=>'info','shipped'=>'success','pa
                     <div style="text-align:center;"><div style="font-size:24px;font-weight:bold;color:var(--danger);">¥<?=format_money($cust['ar_balance'])?></div><div style="font-size:12px;color:var(--gray-500);">应收余额</div></div>
                     <div style="text-align:center;"><div style="font-size:24px;font-weight:bold;"><?=$cust['followup_count']?></div><div style="font-size:12px;color:var(--gray-500);">跟进次数</div></div>
                 </div>
-                <?php if ($cust['last_followed_at']): ?><div style="text-align:center;margin-top:8px;font-size:12px;color:var(--gray-500);">最后跟进：<?=$cust['last_followed_at']?></div><?php endif; ?>
+                <?php if ($cust['last_followed_at']): ?><div style="text-align:center;margin-top:8px;font-size:12px;color:var(--gray-500);">最后跟进：<?=format_datetime_short($cust['last_followed_at'])?></div><?php endif; ?>
                 <?php if (customer_is_deal($cust)): ?><div style="text-align:center;margin-top:4px;font-size:12px;color:var(--success,#28a745);">
                     成交 <?=intval($cust['deal_order_count'])?> 单 · 累计 ¥<?=format_money($cust['deal_amount'])?>
                     · 最近成交 <?=($cust['last_deal_date'] && $cust['last_deal_date'] !== '0000-00-00') ? htmlspecialchars($cust['last_deal_date']) : '--'?>
@@ -147,7 +150,10 @@ $statusBadges = ['draft'=>'warning','confirmed'=>'info','shipped'=>'success','pa
             <div style="font-size:14px;margin-top:4px;"><?=nl2br(htmlspecialchars($f['content']))?></div>
             <div style="margin-top:4px;display:flex;gap:8px;align-items:center;">
                 <span class="badge badge-<?=$f['result']=='已成交'?'success':($f['result']=='有意向'?'primary':($f['result']=='无意向'?'danger':'warning'))?>"><?=$f['result']?></span>
-                <?php if ($f['next_follow_at']): ?><span style="font-size:12px;color:var(--gray-500);">计划下次跟进：<?=$f['next_follow_at']?></span><?php endif; ?>
+                <?php if ($f['next_follow_at']): ?>
+                <?php $fSt = follow_plan_status($f['next_follow_at'], $f['result'], $f['done_after_at'] ?? null); ?>
+                <span style="font-size:12px;color:<?=$fSt['state']==='overdue'?'var(--danger);font-weight:600':'var(--gray-500)'?>;">计划下次跟进：<?=format_datetime_short($f['next_follow_at'])?><?php if ($fSt['state'] === 'overdue'): ?>（已逾期<?=$fSt['days']>0?$fSt['days'].'天':''?>）<?php elseif ($fSt['state'] === 'late_done'): ?>（<?=$fSt['days']>0?'逾期'.$fSt['days'].'天后跟进':'当天已跟进'?>）<?php endif; ?></span>
+                <?php endif; ?>
                 <?php if ($canEditFollowup): ?>
                 <button class="btn btn-sm btn-outline" style="padding:2px 8px;font-size:12px;" onclick="editFollowup(<?=$f['id']?>)" title="编辑此跟进"><i class="fa-solid fa-pen"></i> 编辑</button>
                 <?php endif; ?>
@@ -246,7 +252,13 @@ $statusBadges = ['draft'=>'warning','confirmed'=>'info','shipped'=>'success','pa
             <label id="fuRemoveWrap" style="display:none;font-size:12px;margin-top:4px;cursor:pointer;color:var(--danger);"><input type="checkbox" id="fuRemove"> 删除当前附件</label>
         </div>
         <div class="form-group"><label class="form-label">计划下次跟进</label>
-            <input type="date" name="next_follow_at" class="form-control">
+            <input type="datetime-local" name="next_follow_at" class="form-control">
+            <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;">
+                <button type="button" class="btn btn-sm btn-outline" onclick="setNextFollowQuick(this.closest('.form-group').querySelector('[name=next_follow_at]'),1)">明天 09:00</button>
+                <button type="button" class="btn btn-sm btn-outline" onclick="setNextFollowQuick(this.closest('.form-group').querySelector('[name=next_follow_at]'),7)">一周后 09:00</button>
+                <button type="button" class="btn btn-sm btn-outline" onclick="setNextFollowQuick(this.closest('.form-group').querySelector('[name=next_follow_at]'),null)">清除</button>
+            </div>
+            <small style="color:var(--gray-500);">留空表示暂不计划下次跟进</small>
         </div>
     </div>
 </div>
@@ -357,7 +369,7 @@ function editFollowup(id){
         form.querySelector('[name=follow_type]').value=f.follow_type||'电话';
         form.querySelector('[name=result]').value=f.result||'待跟进';
         form.querySelector('[name=content]').value=f.content||'';
-        form.querySelector('[name=next_follow_at]').value=f.next_follow_at?String(f.next_follow_at).substring(0,10):'';
+        form.querySelector('[name=next_follow_at]').value=toDatetimeLocal(f.next_follow_at);
         var cur=document.getElementById('fuCurrentAttach');
         if(f.attachment){
             cur.innerHTML='当前附件：<a href="../../'+escHtml(f.attachment)+'" target="_blank" download="'+escHtml(f.attachment_name||'')+'">📎 '+escHtml(f.attachment_name||'查看附件')+'</a>';
