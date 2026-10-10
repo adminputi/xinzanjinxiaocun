@@ -387,6 +387,45 @@ function run_migrations() {
                 }
             }
         },
+
+        // ========== 库存调整（原「报损报溢」）升级 ==========
+        // 目标：一行商品可以单独加、也可以单独减（不再整单统一方向）；支持「调整为 N 个」；
+        // 盘盈要能填成本单价，否则库存价值会凭空多出来。
+        // 明细 quantity 语义改为**有符号**：正数=加库存，负数=减库存。
+        'loss_orders_type_mixed' =>
+            "ALTER TABLE loss_orders MODIFY COLUMN `type` VARCHAR(20) NOT NULL DEFAULT 'loss' COMMENT 'loss=减 overflow=加 mixed=有加有减'",
+        'loss_items_price' =>
+            "ALTER TABLE loss_items ADD COLUMN price DECIMAL(12,2) NOT NULL DEFAULT 0 COMMENT '调整成本单价'",
+        'loss_items_target_qty' =>
+            "ALTER TABLE loss_items ADD COLUMN target_qty DECIMAL(12,2) DEFAULT NULL COMMENT '调整为该数量（NULL=按增减量处理）'",
+        'loss_items_actual_diff' =>
+            "ALTER TABLE loss_items ADD COLUMN actual_diff DECIMAL(12,2) DEFAULT NULL COMMENT '确认时实际增减（正=加）'",
+        // 老数据：报损单原本就是减库存 → 数量转负。报溢单保持正数。
+        // 只跑一次（迁移按 key 记账），不会二次取负。
+        'loss_items_signed_qty' =>
+            "UPDATE loss_items SET quantity = -quantity
+             WHERE loss_id IN (SELECT id FROM loss_orders WHERE type='loss')",
+        // 老数据只存了 amount，把单价反算回来（数量已转符号，取绝对值）
+        'loss_items_price_backfill' =>
+            "UPDATE loss_items SET price = ROUND(ABS(amount) / NULLIF(ABS(quantity),0), 2)
+             WHERE price = 0 AND ABS(quantity) > 0",
+        // 老数据：已确认的单没有 actual_diff，用它自己的 quantity 补上（target_qty 老库必为 NULL）
+        'loss_items_actual_diff_backfill' =>
+            "UPDATE loss_items SET actual_diff = quantity WHERE actual_diff IS NULL",
+
+        // ========== 盘点：实盘数允许留空 ==========
+        // 隐患：建单时把所有商品的行都生成好、实盘数默认 0，只盘几个商品时
+        // 其余行会被当成「实盘 0」把库存清零。改成「留空=未盘，不参与差异计算」。
+        'check_items_actual_nullable' =>
+            "ALTER TABLE check_items MODIFY COLUMN `actual_qty` DECIMAL(12,2) DEFAULT NULL COMMENT '实盘数量（NULL=未盘点，不参与差异）'",
+        // 存量：未确认单里 actual_qty=0 且 diff_qty=0 的行是建单自动填的初始值，
+        // 不代表「实盘为 0」→ 统一改回未盘。已确认的单不动。
+        'check_items_uncounted_backfill' => function ($pdo) {
+            $pdo->exec("UPDATE check_items ci
+                        JOIN check_orders c ON c.id = ci.check_id
+                        SET ci.actual_qty = NULL
+                        WHERE c.status = 'draft' AND ci.actual_qty = 0 AND ci.diff_qty = 0");
+        },
     ];
     
     // 执行未完成的迁移

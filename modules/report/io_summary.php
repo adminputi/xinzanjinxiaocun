@@ -19,7 +19,7 @@ $stmt->execute([$dateFrom.' 00:00:00', $dateTo.' 23:59:59']);
 $whSummary = $stmt->fetchAll();
 
 $warehouses = get_options('warehouses','id','name','status=1');
-$typeLabels = ['in'=>'采购入库','out'=>'销售出库','transfer_in'=>'调拨入库','transfer_out'=>'调拨出库','check'=>'盘点调整','loss'=>'报损报溢'];
+$typeLabels = ['in'=>'采购入库','out'=>'销售出库','transfer_in'=>'调拨入库','transfer_out'=>'调拨出库','check'=>'盘点调整','loss'=>'库存调整'];
 ?>
 
 <div class="page-header">

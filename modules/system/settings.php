@@ -94,7 +94,7 @@ foreach ($rows as $r) { $settings[$r['setting_key']] = $r['setting_value']; }
                         <option value="0" <?= ($settings['allow_negative_stock']??'0')==='0'?'selected':'' ?>>禁止（推荐）</option>
                         <option value="1" <?= ($settings['allow_negative_stock']??'0')==='1'?'selected':'' ?>>允许</option>
                     </select>
-                    <small style="color:var(--gray-500);">禁止时，出库/退货/报损/调拨等扣减操作若导致库存为负会被拦截并提示。历史数据已存在负库存的，请先到「库存校验」处理。</small>
+                    <small style="color:var(--gray-500);">禁止时，出库/退货/库存调整/调拨等扣减操作若导致库存为负会被拦截并提示。历史数据已存在负库存的，请先到「库存校验」处理。</small>
                 </div>
             </div>
         </div>

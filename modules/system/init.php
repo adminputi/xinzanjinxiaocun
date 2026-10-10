@@ -18,7 +18,7 @@ $categories = [
     'sales'          => ['name' => '销售记录清空',      'icon' => 'shopping-bag',   'tables' => ['sales_orders', 'sales_order_items', 'sales_outstocks', 'sales_outstock_items', 'sales_returns', 'sales_return_items']],
     'transfer'       => ['name' => '库存调拨清空',      'icon' => 'refresh-cw',     'tables' => ['transfers', 'transfer_items']],
     'check'          => ['name' => '盘点记录清空',      'icon' => 'clipboard',      'tables' => ['check_orders', 'check_items']],
-    'loss'           => ['name' => '报损报溢清空',      'icon' => 'alert-triangle', 'tables' => ['loss_orders', 'loss_items']],
+    'loss'           => ['name' => '库存调整清空',      'icon' => 'alert-triangle', 'tables' => ['loss_orders', 'loss_items']],
     'finance'        => ['name' => '财务记录清空',      'icon' => 'dollar-sign',    'tables' => ['receipts', 'payments']],
     'logs'           => ['name' => '操作日志清空',      'icon' => 'file-text',      'tables' => ['operation_logs']],
 ];

@@ -29,7 +29,7 @@ $pages = ceil($total/$perPage);
 $stmt = $pdo->prepare("SELECT l.*, p.name as product_name, p.sku, w.name as warehouse_name, u.real_name as user_name FROM inventory_logs l JOIN products p ON l.product_id=p.id LEFT JOIN warehouses w ON l.warehouse_id=w.id LEFT JOIN users u ON l.user_id=u.id $where ORDER BY l.id DESC LIMIT $offset,$perPage");
 $stmt->execute($params); $list = $stmt->fetchAll();
 
-$typeLabels = ['in'=>'入库','out'=>'出库','transfer_in'=>'调拨入','transfer_out'=>'调拨出','check'=>'盘点调整','loss'=>'报损报溢'];
+$typeLabels = ['in'=>'入库','out'=>'出库','transfer_in'=>'调拨入','transfer_out'=>'调拨出','check'=>'盘点调整','loss'=>'库存调整'];
 $typeBadges = ['in'=>'success','out'=>'danger','transfer_in'=>'info','transfer_out'=>'warning','check'=>'primary','loss'=>'orange'];
 ?>
 

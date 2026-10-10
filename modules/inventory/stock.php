@@ -75,7 +75,7 @@ $totalTypes = $pdo->query("SELECT COUNT(DISTINCT product_id) FROM inventory WHER
 
 <div class="card"><div class="card-body" style="padding:0;"><div class="table-container">
 <table class="stock-table">
-<thead><tr><th style="width:48px;">图片</th><th class="mob-hide">SKU</th><th>商品名称</th><th class="mob-hide">分类</th><th>规格</th><th class="col-stock">库存数量</th><th class="mob-hide">采购价</th><th class="mob-hide">平均成本</th><th class="mob-hide">库存价值</th><th>最低库存</th><th>状态</th><th style="width:60px;">操作</th></tr></thead>
+<thead><tr><th style="width:48px;">图片</th><th class="mob-hide">SKU</th><th>商品名称</th><th class="mob-hide">分类</th><th>规格</th><th class="col-stock">库存数量</th><th class="mob-hide">采购价</th><th class="mob-hide">平均成本</th><th class="mob-hide">库存价值</th><th>最低库存</th><th>状态</th><th style="width:90px;">操作</th></tr></thead>
 <tbody>
 <?php if ($list): foreach ($list as $item): $stock = floatval($item['stock_qty']);
 $unitCost = floatval($item['avg_cost']) > 0 ? floatval($item['avg_cost']) : floatval($item['purchase_price']);
@@ -106,7 +106,10 @@ $stockVal = $stock * $unitCost; ?>
     <td class="mob-hide" data-label="库存价值">¥<?=format_money($stockVal)?></td>
     <td data-label="最低库存"><?=$item['min_stock']?:'-'?></td>
     <td data-label="状态"><?= $item['min_stock']>0&&$stock<=$item['min_stock'] ? '<span class="badge badge-danger">库存不足</span>' : ($stock>0?'<span class="badge badge-success">正常</span>':'<span class="badge badge-warning">缺货</span>') ?></td>
-    <td><button class="btn btn-sm btn-outline" onclick="viewProductDetail(<?=$item['id']?>)" title="查看详情"><i class="fa-solid fa-eye"></i></button></td>
+    <td style="white-space:nowrap;">
+        <a href="loss.php?add=1&product_id=<?=$item['id']?>&warehouse_id=<?=$warehouseId?>" class="btn btn-sm btn-outline" title="调整该商品库存"><i class="fa-solid fa-sliders"></i></a>
+        <button class="btn btn-sm btn-outline" onclick="viewProductDetail(<?=$item['id']?>)" title="查看详情"><i class="fa-solid fa-eye"></i></button>
+    </td>
 </tr>
 <?php endforeach; else: ?>
 <tr><td colspan="12"><div class="empty-state"><i class="fa-solid fa-boxes-stacked"></i><p>暂无库存数据</p></div></td></tr>

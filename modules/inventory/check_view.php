@@ -35,15 +35,18 @@ $items = $stmt2->fetchAll();
         <div class="table-container"><table>
             <thead><tr><th>#</th><th>SKU</th><th>商品名称</th><th>规格</th><th>账面库存</th><th>实盘数量</th><th>差异</th><th>备注</th></tr></thead>
             <tbody>
-                <?php $i=1; foreach($items as $item): $diff = floatval($item['actual_qty']) - floatval($item['book_qty']); ?>
+                <?php $i=1; foreach($items as $item):
+                    $isCounted = $item['actual_qty'] !== null;
+                    $diff = $isCounted ? floatval($item['actual_qty']) - floatval($item['book_qty']) : 0;
+                ?>
                 <tr>
                     <td><?=$i++?></td>
                     <td><?=$item['sku']?></td>
                     <td><strong><?=htmlspecialchars($item['product_name'])?></strong></td>
                     <td><?=$item['spec']?:'-'?></td>
                     <td><?=$item['book_qty']?></td>
-                    <td><?=$item['actual_qty']?></td>
-                    <td style="color:<?=$diff!=0?($diff>0?'var(--success)':'var(--danger)'):'var(--gray-500)'?>;font-weight:bold;"><?=$diff!=0?($diff>0?'+'.$diff:$diff):'0'?></td>
+                    <td><?=$isCounted?floatval($item['actual_qty']):'<span style="color:var(--gray-400);">未盘</span>'?></td>
+                    <td style="color:<?=$diff!=0?($diff>0?'var(--success)':'var(--danger)'):'var(--gray-500)'?>;font-weight:bold;"><?=!$isCounted?'-':($diff!=0?($diff>0?'+'.$diff:$diff):'0')?></td>
                     <td><?=htmlspecialchars($item['remark']?:'-')?></td>
                 </tr>
                 <?php endforeach; ?>

@@ -38,21 +38,49 @@ if ($id > 0) {
 }
 
 $isAdmin = ($_SESSION['user_role'] ?? '') === 'admin';
+
+// 客户下拉要显示「名称 + 电话」（同名客户靠电话区分），所以电话单独取一份。
+// $customers 仍保持 id=>name 结构，表单回填等既有代码不用跟着改
+$customers = [];
+$customerPhones = [];
 if ($isAdmin) {
-    $customers = get_options('customers', 'id', 'name', 'status=1');
+    $stmt = $pdo->query("SELECT id, name, phone FROM customers WHERE status=1 ORDER BY id");
 } else {
-    $customers = get_options('customers', 'id', 'name', [['status','=',1], ['owner_id','=',get_user_id()]]);
+    $stmt = $pdo->prepare("SELECT id, name, phone FROM customers WHERE status=1 AND owner_id=? ORDER BY id");
+    $stmt->execute([get_user_id()]);
 }
+foreach ($stmt->fetchAll() as $c) {
+    $customers[$c['id']] = $c['name'];
+    $customerPhones[$c['id']] = $c['phone'] ?? '';
+}
+
 $employees = get_options('users', 'id', 'real_name', 'status=1');
 
 // 原单（编辑/复制）的客户若已停用或不在可选范围内，补进来保证名称能正常显示在搜索框里，
 // 避免界面上客户框空白、但隐藏字段仍带着旧的 customer_id 这种隐性错误
 if ($quote && ($quote['customer_id'] ?? 0) && !isset($customers[$quote['customer_id']])) {
-    $stmt = $pdo->prepare("SELECT name FROM customers WHERE id=?");
+    $stmt = $pdo->prepare("SELECT name, phone FROM customers WHERE id=?");
     $stmt->execute([intval($quote['customer_id'])]);
-    $oldCustomerName = $stmt->fetchColumn();
-    if ($oldCustomerName) $customers[$quote['customer_id']] = $oldCustomerName;
+    $oldCustomer = $stmt->fetch();
+    if ($oldCustomer) {
+        $customers[$quote['customer_id']] = $oldCustomer['name'];
+        $customerPhones[$quote['customer_id']] = $oldCustomer['phone'] ?? '';
+    }
 }
+
+// 业务员：非管理员只能开自己名下的单。前端把下拉锁死（禁用后不提交，另配隐藏域），
+// 保存时 quote_form_save() 里再强制覆盖一次，防止改 POST 挂到别人名下
+$currentUid = get_user_id();
+$employeeLocked = !$isAdmin;
+if ($currentUid && !isset($employees[$currentUid])) {
+    // 当前账号若已被停用会不在列表里，补进来，否则锁定后下拉显示不出名字
+    $stmt = $pdo->prepare("SELECT real_name FROM users WHERE id=?");
+    $stmt->execute([$currentUid]);
+    $currentName = $stmt->fetchColumn();
+    if ($currentName) $employees[$currentUid] = $currentName;
+}
+$employeeValue = $quote ? intval($quote['employee_id'] ?? 0) : $currentUid;
+if ($employeeLocked) $employeeValue = $currentUid;
 // image 字段用于「添加商品」弹窗里显示商品缩略图（products.image 已存在于建表语句，无需迁移）
 $products = $pdo->query("SELECT id, sku, name, spec, image, sale_price, (SELECT name FROM units WHERE id=unit_id) as unit_name FROM products WHERE status=1 ORDER BY id")->fetchAll();
 
@@ -66,6 +94,10 @@ function quote_form_save($pdo, $quote) {
     $customerId = intval($_POST['customer_id'] ?? 0);
     $quoteDate = $_POST['quote_date'] ?? date('Y-m-d');
     $employeeId = intval($_POST['employee_id'] ?? 0);
+    // 非管理员强制记在自己名下：前端只是禁用下拉，这里兜底防止改 POST 把单子挂给别人
+    if (($_SESSION['user_role'] ?? '') !== 'admin') {
+        $employeeId = get_user_id();
+    }
     $remark = $_POST['remark'] ?? '';
     $pids = $_POST['product_id'] ?? [];
     $qtys = $_POST['quantity'] ?? [];
@@ -194,16 +226,24 @@ foreach ($products as $p) {
             <div class="form-row">
                 <div class="form-group" style="position:relative;">
                     <label class="form-label">客户 <span class="required">*</span></label>
-                    <input type="text" id="customerSearch" class="form-control" placeholder="输入客户名称搜索..." autocomplete="off" onfocus="showCustomerDropdown()" oninput="filterCustomers()" onkeydown="handleCustomerKey(event)" value="<?= $quote && $quote['customer_id'] ? htmlspecialchars($customers[$quote['customer_id']]??'') : '' ?>">
+                    <input type="text" id="customerSearch" class="form-control" placeholder="输入客户名称或电话搜索..." autocomplete="off" onfocus="showCustomerDropdown()" oninput="filterCustomers()" onkeydown="handleCustomerKey(event)" value="<?= $quote && $quote['customer_id'] ? htmlspecialchars($customers[$quote['customer_id']]??'') : '' ?>">
                     <input type="hidden" name="customer_id" id="customerId" value="<?= $quote['customer_id']??'' ?>" required>
-                    <div class="search-dropdown" id="customerDropdown" style="display:none;position:absolute;top:100%;left:0;right:0;max-height:220px;overflow-y:auto;background:#fff;border:1px solid var(--gray-300);border-radius:6px;z-index:100;box-shadow:0 4px 12px rgba(0,0,0,0.1);"></div>
+                    <div class="search-dropdown" id="customerDropdown" style="display:none;position:absolute;top:100%;left:0;right:0;max-height:260px;overflow-y:auto;background:#fff;border:1px solid var(--gray-300);border-radius:6px;z-index:100;box-shadow:0 4px 12px rgba(0,0,0,0.1);"></div>
                 </div>
                 <div class="form-group">
-                    <label class="form-label">业务员</label>
+                    <label class="form-label">业务员<?php if ($employeeLocked): ?> <span style="font-weight:400;color:var(--gray-500);font-size:12px;">（默认本人，不可修改）</span><?php endif; ?></label>
+                    <?php if ($employeeLocked): ?>
+                    <!-- 禁用的 select 不会随表单提交，所以真正提交的是这个隐藏域 -->
+                    <input type="hidden" name="employee_id" value="<?= intval($employeeValue) ?>">
+                    <select class="form-control" disabled>
+                        <option selected><?= htmlspecialchars($employees[$employeeValue] ?? '未知用户') ?></option>
+                    </select>
+                    <?php else: ?>
                     <select name="employee_id" class="form-control">
                         <option value="0">选择业务员</option>
-                        <?php foreach($employees as $eid=>$ename): ?><option value="<?=$eid?>" <?=$quote&&$quote['employee_id']==$eid?'selected':''?>><?=$ename?></option><?php endforeach; ?>
+                        <?php foreach($employees as $eid=>$ename): ?><option value="<?=$eid?>" <?=$employeeValue==$eid?'selected':''?>><?=htmlspecialchars($ename)?></option><?php endforeach; ?>
                     </select>
+                    <?php endif; ?>
                 </div>
             </div>
             <div class="form-row">
@@ -337,6 +377,21 @@ foreach ($products as $p) {
 
 <script>
 var allCustomers = <?= json_encode($customers, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG) ?>;
+var allCustomerPhones = <?= json_encode($customerPhones, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG) ?>;
+
+/**
+ * 客户下拉渲染：每行显示「客户名称 + 电话」。
+ * 同名客户很多，只看名称分不清是谁；同时支持按电话反查。
+ */
+function customerRowHtml(id, name) {
+    var phone = allCustomerPhones[id] || '';
+    var html = '<div class="search-dropdown-item" data-id="'+id+'" data-name="'+escapeHtml(name)+'" onclick="selectCustomer(this)" style="padding:8px 12px;cursor:pointer;font-size:13px;border-bottom:1px solid var(--gray-100);transition:background 0.15s;">';
+    html += '<div>'+escapeHtml(name)+'</div>';
+    if (phone) {
+        html += '<div style="font-size:12px;color:var(--gray-500);margin-top:2px;"><i class="fa-solid fa-phone" style="margin-right:4px;"></i>'+escapeHtml(phone)+'</div>';
+    }
+    return html + '</div>';
+}
 
 function filterCustomers() {
     var q = (document.getElementById('customerSearch').value||'').toLowerCase();
@@ -346,9 +401,11 @@ function filterCustomers() {
     for (var id in allCustomers) {
         if (!allCustomers.hasOwnProperty(id)) continue;
         var name = allCustomers[id];
-        if (q && name.toLowerCase().indexOf(q) === -1) continue;
+        var phone = allCustomerPhones[id] || '';
+        // 名称或电话任一命中即可，方便直接用手机号定位客户
+        if (q && name.toLowerCase().indexOf(q) === -1 && phone.toLowerCase().indexOf(q) === -1) continue;
         count++;
-        html += '<div class="search-dropdown-item" data-id="'+id+'" data-name="'+escapeHtml(name)+'" onclick="selectCustomer(this)" style="padding:8px 12px;cursor:pointer;font-size:13px;border-bottom:1px solid var(--gray-100);transition:background 0.15s;">'+escapeHtml(name)+'</div>';
+        html += customerRowHtml(id, name);
     }
     if (count === 0) html = '<div style="padding:12px;text-align:center;color:var(--gray-400);font-size:13px;">未找到匹配的客户</div>';
     dropdown.innerHTML = html;

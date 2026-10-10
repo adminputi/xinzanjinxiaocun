@@ -97,6 +97,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $effectiveDate= trim($_POST['effective_date'] ?? '');
     $expiryDate   = trim($_POST['expiry_date'] ?? '');
     $employeeId   = intval($_POST['employee_id'] ?? 0);
+    // 非管理员强制记在自己名下：前端只是禁用下拉，这里兜底防止改 POST 把业绩挂给别人
+    if (($_SESSION['user_role'] ?? '') !== 'admin') {
+        $employeeId = get_user_id();
+    }
     $remark       = trim($_POST['remark'] ?? '');
 
     if ($newQuoteId <= 0) {
@@ -204,6 +208,23 @@ $payTypes = $pdo->query("SELECT * FROM contract_payment_types WHERE status=1 ORD
 $templates = $pdo->query("SELECT id, name FROM print_templates WHERE type='sales_contract' ORDER BY is_default DESC, id")->fetchAll();
 $employees = $pdo->query("SELECT id, real_name FROM users WHERE status=1 ORDER BY id")->fetchAll();
 
+// 业务员：非管理员只能签自己名下的合同（业绩归属跟着走）。
+// 前端锁死下拉，保存时 contract 里再强制覆盖一次，防止改 POST 挂到别人名下
+$isAdmin = ($_SESSION['user_role'] ?? '') === 'admin';
+$employeeLocked = !$isAdmin;
+$currentUid = get_user_id();
+$employeeValue = $contract ? intval($contract['employee_id'] ?? 0) : $currentUid;
+if ($employeeLocked || !$employeeValue) $employeeValue = $currentUid;
+// 当前账号若已被停用会不在列表里，补进来，否则锁定后下拉显示不出名字
+$hasCurrent = false;
+foreach ($employees as $e) { if (intval($e['id']) === $currentUid) { $hasCurrent = true; break; } }
+if (!$hasCurrent) {
+    $stU = $pdo->prepare("SELECT id, real_name FROM users WHERE id=?");
+    $stU->execute([$currentUid]);
+    $curUser = $stU->fetch();
+    if ($curUser) $employees[] = $curUser;
+}
+
 // 新建时从最近一份合同带出公司侧固定信息，减少重复录入
 $defaults = ['warranty'=>'', 'tax_note'=>'不含税不含运费', 'bank_name'=>'', 'bank_account'=>'', 'hotline'=>'', 'prep_days'=>7];
 if (!$contract) {
@@ -278,13 +299,22 @@ require_once __DIR__ . '/../../includes/header.php';
                 <input type="number" step="0.01" name="total_amount" id="totalAmount" class="form-control" value="<?= htmlspecialchars($curAmount) ?>" oninput="renderTerms()">
             </div>
             <div class="form-group">
-                <label class="form-label">业务员</label>
+                <label class="form-label">业务员<?php if ($employeeLocked): ?> <span style="font-weight:400;color:var(--gray-500);font-size:12px;">（默认本人，不可修改）</span><?php endif; ?></label>
+                <?php if ($employeeLocked): ?>
+                <!-- 禁用的 select 不会随表单提交，所以真正提交的是这个隐藏域 -->
+                <input type="hidden" name="employee_id" value="<?= intval($employeeValue) ?>">
+                <select class="form-control" disabled>
+                    <?php $lockedName = '未知用户'; foreach ($employees as $e) { if (intval($e['id']) === intval($employeeValue)) { $lockedName = $e['real_name']; break; } } ?>
+                    <option selected><?= htmlspecialchars($lockedName) ?></option>
+                </select>
+                <?php else: ?>
                 <select name="employee_id" class="form-control">
                     <option value="0">-</option>
                     <?php foreach ($employees as $e): ?>
-                    <option value="<?=$e['id']?>" <?= ($contract['employee_id'] ?? get_user_id()) == $e['id'] ? 'selected' : '' ?>><?= htmlspecialchars($e['real_name']) ?></option>
+                    <option value="<?=$e['id']?>" <?= $employeeValue == $e['id'] ? 'selected' : '' ?>><?= htmlspecialchars($e['real_name']) ?></option>
                     <?php endforeach; ?>
                 </select>
+                <?php endif; ?>
             </div>
         </div>
         <div class="form-row">

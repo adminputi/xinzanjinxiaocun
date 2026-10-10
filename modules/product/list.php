@@ -132,7 +132,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 '销售退货单' => "SELECT COUNT(*) FROM sales_return_items WHERE product_id=?",
                 '调拨单'     => "SELECT COUNT(*) FROM transfer_items WHERE product_id=?",
                 '盘点单'     => "SELECT COUNT(*) FROM check_items WHERE product_id=?",
-                '报损单'     => "SELECT COUNT(*) FROM loss_items WHERE product_id=?",
+                '库存调整单' => "SELECT COUNT(*) FROM loss_items WHERE product_id=?",
                 '库存记录'   => "SELECT COUNT(*) FROM inventory WHERE product_id=? AND quantity<>0",
             ]);
             if (!$chk['ok']) {

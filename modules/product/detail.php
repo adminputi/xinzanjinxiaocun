@@ -53,7 +53,7 @@ $stmt = $pdo->prepare("
             WHEN 'transfer_in' THEN '调拨入库' 
             WHEN 'transfer_out' THEN '调拨出库' 
             WHEN 'check' THEN '盘点' 
-            WHEN 'loss' THEN '报损报溢' 
+            WHEN 'loss' THEN '库存调整' 
             ELSE il.type 
         END as type_name
     FROM inventory_logs il 

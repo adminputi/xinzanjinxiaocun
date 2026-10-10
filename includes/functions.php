@@ -581,7 +581,7 @@ function perm_code_list() {
         'sales_quote' => '销售报价', 'sales_contract' => '销售合同', 'sales_order' => '销售订单', 'sales_outstock' => '销售出库', 'sales_return' => '销售退货', 'sales_reconcile' => '客户对账', 'print_template' => '打印模板',
         // 销售收款：只覆盖「出库单/订单详情里的登记收款、修改收款状态」，不含收款记录列表与作废
         'sales_receive' => '销售收款登记（登记收款/修改收款状态）',
-        'inventory_view' => '库存查看', 'inventory_log' => '库存变动', 'transfer_manage' => '调拨管理', 'check_manage' => '盘点管理', 'loss_manage' => '报损报溢',
+        'inventory_view' => '库存查看', 'inventory_log' => '库存变动', 'transfer_manage' => '调拨管理', 'check_manage' => '盘点管理', 'loss_manage' => '库存调整',
         'finance_arpay' => '应收应付', 'finance_receive' => '收款记录', 'finance_payment' => '付款记录', 'finance_aging' => '账龄分析',
         'report_sales' => '销售报表', 'report_purchase' => '采购报表', 'report_inventory' => '库存报表', 'report_performance' => '业绩报表', 'report_io' => '出入库汇总',
         'system_users' => '用户管理', 'system_roles' => '角色管理', 'system_logs' => '操作日志', 'system_settings' => '系统设置',
@@ -991,6 +991,200 @@ function update_avg_cost($productId, $warehouseId, $quantity, $price) {
     } catch (Exception $e) {
         error_log('update_avg_cost error: ' . $e->getMessage());
         return false; // 成本计算失败不应阻断入库业务
+    }
+}
+
+/**
+ * 确认库存调整单（原「报损报溢」）——loss.php 与 loss_view.php 共用，避免两处逻辑漂移
+ *
+ * 明细行的两种填法：
+ *   1) 增减量：quantity 存有符号增减值（正=加、负=减），target_qty 为 NULL
+ *   2) 调整为：target_qty 存目标数量，差值在**确认这一刻**才按当时库存计算
+ *      （保存时就算好的话，建单到确认之间若发生出入库，差值就是错的）
+ *
+ * 盘盈（加库存）必须按填写的单价重算移动加权成本，否则库存数量多了、
+ * 成本还是旧的，库存价值就凭空多出来一块。
+ *
+ * @return array ['ok'=>bool, 'msg'=>string, 'added'=>int, 'reduced'=>int, 'changed'=>int]
+ */
+function confirm_loss_order($pdo, $id) {
+    $id = intval($id);
+    $st = $pdo->prepare("SELECT * FROM loss_orders WHERE id=?");
+    $st->execute([$id]);
+    $order = $st->fetch();
+    if (!$order) return ['ok' => false, 'msg' => '单据不存在'];
+    if ($order['status'] !== 'draft') return ['ok' => false, 'msg' => '只有草稿状态的单据可确认'];
+
+    $st = $pdo->prepare("SELECT * FROM loss_items WHERE loss_id=?");
+    $st->execute([$id]);
+    $items = $st->fetchAll();
+    if (!$items) return ['ok' => false, 'msg' => '没有明细，无法确认'];
+
+    $pdo->beginTransaction();
+    try {
+        $pdo->prepare("UPDATE loss_orders SET status='confirmed', created_at=? WHERE id=?")
+            ->execute([date('Y-m-d H:i:s'), $id]);
+
+        $stockStmt = $pdo->prepare("SELECT COALESCE(quantity,0) FROM inventory WHERE product_id=? AND warehouse_id=?");
+        $updItem   = $pdo->prepare("UPDATE loss_items SET quantity=?, price=?, amount=?, actual_diff=? WHERE id=?");
+        $changed = 0; $added = 0; $reduced = 0;
+        foreach ($items as $it) {
+            $stockStmt->execute([$it['product_id'], $order['warehouse_id']]);
+            $curQty = floatval($stockStmt->fetchColumn());
+            $diff = ($it['target_qty'] !== null)
+                ? floatval($it['target_qty']) - $curQty
+                : floatval($it['quantity']);
+            $price = floatval($it['price']);
+            if (abs($diff) < 0.000001) {
+                $updItem->execute([0, $price, 0, 0, $it['id']]);
+                continue;
+            }
+            update_inventory($it['product_id'], $order['warehouse_id'], $diff, 'loss', $order['bill_no'], 'loss', get_user_id(), $it['reason'] ?? '');
+            if ($diff > 0) {
+                // 加库存：按填写单价重算加权成本（顺序同采购入库：先改数量再改成本）
+                if ($price > 0) update_avg_cost($it['product_id'], $order['warehouse_id'], $diff, $price);
+                $added++;
+            } else {
+                // 减库存：移动加权成本不变，金额按填写单价记损失
+                $reduced++;
+            }
+            $updItem->execute([$diff, $price, abs($diff) * $price, $diff, $it['id']]);
+            $changed++;
+        }
+        add_log(get_user_id(), 'confirm', 'loss_order',
+            "确认库存调整: {$order['bill_no']}（加 {$added} 行 / 减 {$reduced} 行）");
+        $pdo->commit();
+        return [
+            'ok' => true,
+            'msg' => "已确认，{$changed} 个商品库存已调整",
+            'added' => $added, 'reduced' => $reduced, 'changed' => $changed,
+        ];
+    } catch (Exception $e) {
+        $pdo->rollBack();
+        error_log('confirm_loss_order error: ' . $e->getMessage());
+        return ['ok' => false, 'msg' => '确认失败：' . $e->getMessage()];
+    }
+}
+
+/**
+ * 撤回库存调整单——**含盘盈的单据一律不允许撤回**
+ *
+ * 原因：盘盈时已经按填写单价把成本加权进去了，撤回只能把数量退回去，
+ * 移动加权成本没法精确还原（这是所有进销存的通病）。与其留一个算不准的成本，
+ * 不如禁止撤回、让用户另开一张反向调整单，账更干净。
+ *
+ * @return array ['ok'=>bool, 'msg'=>string]
+ */
+function withdraw_loss_order($pdo, $id) {
+    $id = intval($id);
+    $st = $pdo->prepare("SELECT * FROM loss_orders WHERE id=?");
+    $st->execute([$id]);
+    $order = $st->fetch();
+    if (!$order) return ['ok' => false, 'msg' => '单据不存在'];
+    if ($order['status'] !== 'confirmed') return ['ok' => false, 'msg' => '只有已确认的单据可撤回'];
+
+    $st = $pdo->prepare("SELECT * FROM loss_items WHERE loss_id=?");
+    $st->execute([$id]);
+    $items = $st->fetchAll();
+
+    // actual_diff 是确认时写下的真实增减；老数据可能为空，退回用 quantity
+    foreach ($items as $it) {
+        $actual = $it['actual_diff'] !== null ? floatval($it['actual_diff']) : floatval($it['quantity']);
+        if ($actual > 0.000001) {
+            return [
+                'ok' => false,
+                'msg' => '该单包含盘盈（增加库存），撤回后成本无法精确还原，请另开一张反向调整单',
+            ];
+        }
+    }
+
+    $pdo->beginTransaction();
+    try {
+        $pdo->prepare("UPDATE loss_orders SET status='draft' WHERE id=?")->execute([$id]);
+        foreach ($items as $it) {
+            $actual = $it['actual_diff'] !== null ? floatval($it['actual_diff']) : floatval($it['quantity']);
+            if (abs($actual) < 0.000001) continue;
+            update_inventory($it['product_id'], $order['warehouse_id'], -$actual, 'loss', $order['bill_no'], 'loss', get_user_id(), '撤回库存调整');
+        }
+        add_log(get_user_id(), 'withdraw', 'loss_order', "撤回库存调整: {$order['bill_no']}");
+        $pdo->commit();
+        return ['ok' => true, 'msg' => '已撤回，库存已恢复'];
+    } catch (Exception $e) {
+        $pdo->rollBack();
+        error_log('withdraw_loss_order error: ' . $e->getMessage());
+        return ['ok' => false, 'msg' => '撤回失败：' . $e->getMessage()];
+    }
+}
+
+/**
+ * 确认盘点单——check.php 与 check_edit.php 共用（原来两处各写一份，改一处漏一处）
+ *
+ * 核心规则：**实盘数留空 = 未盘点，不参与差异计算**。
+ * 以前建单就把所有商品的行生成好、实盘数默认 0，只盘几个商品时其余行会被当成
+ * 「实盘 0」把库存清零。现在没盘的行直接跳过，从根子上杜绝误清。
+ *
+ * @return array ['ok'=>bool, 'msg'=>string, 'counted'=>int, 'skipped'=>int, 'changed'=>int]
+ */
+function confirm_check_order($pdo, $checkId) {
+    $checkId = intval($checkId);
+    $st = $pdo->prepare("SELECT * FROM check_orders WHERE id=?");
+    $st->execute([$checkId]);
+    $order = $st->fetch();
+    if (!$order) return ['ok' => false, 'msg' => '盘点单不存在'];
+    if ($order['status'] === 'confirmed') return ['ok' => false, 'msg' => '盘点单已确认，不能重复确认（差异会被重复叠加）'];
+    if ($order['status'] === 'cancelled') return ['ok' => false, 'msg' => '盘点单已作废，不能确认'];
+
+    $st = $pdo->prepare("SELECT * FROM check_items WHERE check_id=?");
+    $st->execute([$checkId]);
+    $items = $st->fetchAll();
+    if (!$items) return ['ok' => false, 'msg' => '盘点单没有明细'];
+
+    foreach ($items as $item) {
+        if ($item['actual_qty'] !== null && floatval($item['actual_qty']) < 0) {
+            return ['ok' => false, 'msg' => '实盘数量不能为负数，请检查后再确认'];
+        }
+    }
+
+    $pdo->beginTransaction();
+    try {
+        $bookStmt = $pdo->prepare("SELECT COALESCE(quantity,0) FROM inventory WHERE product_id=? AND warehouse_id=?");
+        $updItem  = $pdo->prepare("UPDATE check_items SET book_qty=?, diff_qty=? WHERE id=?");
+        $counted = 0; $skipped = 0; $changed = 0;
+        foreach ($items as $item) {
+            // 确认时按当前实际库存重算账面数，避免建单到确认之间的出入库被旧差异覆盖
+            $bookStmt->execute([$item['product_id'], $order['warehouse_id']]);
+            $bookQty = floatval($bookStmt->fetchColumn());
+
+            if ($item['actual_qty'] === null) {
+                // 未盘：只把账面数刷新成最新，差异记 0，绝不动库存
+                $updItem->execute([$bookQty, 0, $item['id']]);
+                $skipped++;
+                continue;
+            }
+
+            $actualQty = floatval($item['actual_qty']);
+            $diffQty = $actualQty - $bookQty;
+            $updItem->execute([$bookQty, $diffQty, $item['id']]);
+            if (abs($diffQty) > 0.000001) {
+                update_inventory($item['product_id'], $order['warehouse_id'], $diffQty, 'check', $order['bill_no'], 'check', get_user_id(), '盘点调整');
+                $changed++;
+            }
+            $counted++;
+        }
+        $pdo->prepare("UPDATE check_orders SET status='confirmed' WHERE id=?")->execute([$checkId]);
+        add_log(get_user_id(), 'confirm', 'check_order',
+            "确认盘点: {$order['bill_no']}（已盘 {$counted} 项，未盘跳过 {$skipped} 项）");
+        $pdo->commit();
+        return [
+            'ok' => true,
+            'msg' => "已确认：{$counted} 项已盘点（{$changed} 项有差异已调整库存）"
+                   . ($skipped ? "，{$skipped} 项未盘点已跳过" : ''),
+            'counted' => $counted, 'skipped' => $skipped, 'changed' => $changed,
+        ];
+    } catch (Exception $e) {
+        $pdo->rollBack();
+        error_log('confirm_check_order error: ' . $e->getMessage());
+        return ['ok' => false, 'msg' => '确认失败：' . $e->getMessage()];
     }
 }
 
@@ -1447,7 +1641,7 @@ function get_menu() {
             ['name' => '库存变动', 'url' => 'modules/inventory/logs.php', 'icon' => 'clock-rotate-left', 'perm' => 'inventory_log'],
             ['name' => '调拨管理', 'url' => 'modules/inventory/transfer.php', 'icon' => 'arrows-rotate', 'perm' => 'transfer_manage'],
             ['name' => '盘点管理', 'url' => 'modules/inventory/check.php', 'icon' => 'clipboard-list', 'perm' => 'check_manage'],
-            ['name' => '报损报溢', 'url' => 'modules/inventory/loss.php', 'icon' => 'triangle-exclamation', 'perm' => 'loss_manage'],
+            ['name' => '库存调整', 'url' => 'modules/inventory/loss.php', 'icon' => 'triangle-exclamation', 'perm' => 'loss_manage'],
             ['name' => '库存校验', 'url' => 'modules/inventory/repair.php', 'icon' => 'stethoscope', 'perm' => 'check_manage'],
         ]],
         // 7. 售后追踪（紧接库存管理之后）
@@ -1531,7 +1725,7 @@ function get_page_name_map() {
         'modules/sales/return_view.php'      => '销售退货单详情',
         'modules/inventory/check_edit.php'   => '盘点编辑',
         'modules/inventory/check_view.php'   => '盘点详情',
-        'modules/inventory/loss_view.php'    => '报损报溢详情',
+        'modules/inventory/loss_view.php'    => '库存调整详情',
         'modules/inventory/transfer_view.php' => '调拨单详情',
         'modules/product/customer_detail.php' => '客户详情',
         'modules/crm/customer_detail.php'    => 'CRM客户详情',
