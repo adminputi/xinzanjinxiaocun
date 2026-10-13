@@ -156,7 +156,7 @@ if ($existContract->fetchColumn() == 0) {
 <div class="card">
     <div class="card-header">
         <h3 class="card-title">模板列表</h3>
-        <div class="alert alert-info" style="margin:0;padding:6px 12px;font-size:12px;">可用变量：{company_name} {company_address} {bill_no} {bill_date} {customer_name} {customer_phone} {customer_address} {customer_contact} {supplier_name} {warehouse_name} {employee_name} {employee_phone} {items} {total_amount} {total_amount_cn} {remark} {user_name} {tracking_no}<br><strong>销售合同专用：</strong>{contract_no} {quote_no} {sign_date} {purchase_desc} {tax_note} {prep_days} {payment_terms} {deposit_amount} {deposit_amount_cn} {balance_amount} {balance_amount_cn} {delivery_place} {receiver_name} {receiver_phone} {warranty} {hotline} {bank_name} {bank_account} {attachment}</div>
+        <div class="alert alert-info" style="margin:0;padding:6px 12px;font-size:12px;">可用变量：{company_name} {company_address} {bill_no} {bill_date} {customer_name} {customer_phone} {customer_address} {customer_contact} {supplier_name} {warehouse_name} {employee_name} {employee_phone} {items} {total_amount} {total_amount_cn} {remark} {user_name} {tracking_no}<br><strong>销售合同专用：</strong>{contract_no} {quote_no} {sign_date} {purchase_desc} {tax_note} {prep_days} {payment_terms} {deposit_amount} {deposit_amount_cn} {balance_amount} {balance_amount_cn} {delivery_place} {receiver_name} {receiver_phone} {warranty} {hotline} {attachment}</div>
     </div>
     <div class="card-body">
         <h4 style="margin-bottom:10px;font-size:14px;">📋 可用变量说明</h4>
@@ -200,8 +200,6 @@ if ($existContract->fetchColumn() == 0) {
             <tr><td style="padding:4px 10px;border:1px solid #e2e8f0;"><code>{receiver_phone}</code></td><td style="padding:4px 10px;border:1px solid #e2e8f0;">接货人电话</td><td style="padding:4px 10px;border:1px solid #e2e8f0;">销售合同</td></tr>
             <tr><td style="padding:4px 10px;border:1px solid #e2e8f0;"><code>{warranty}</code></td><td style="padding:4px 10px;border:1px solid #e2e8f0;">质保条款，如「主机质保3年」</td><td style="padding:4px 10px;border:1px solid #e2e8f0;">销售合同</td></tr>
             <tr><td style="padding:4px 10px;border:1px solid #e2e8f0;"><code>{hotline}</code></td><td style="padding:4px 10px;border:1px solid #e2e8f0;">技术支持热线</td><td style="padding:4px 10px;border:1px solid #e2e8f0;">销售合同</td></tr>
-            <tr><td style="padding:4px 10px;border:1px solid #e2e8f0;"><code>{bank_name}</code></td><td style="padding:4px 10px;border:1px solid #e2e8f0;">乙方（供方）开户行</td><td style="padding:4px 10px;border:1px solid #e2e8f0;">销售合同</td></tr>
-            <tr><td style="padding:4px 10px;border:1px solid #e2e8f0;"><code>{bank_account}</code></td><td style="padding:4px 10px;border:1px solid #e2e8f0;">乙方（供方）账号号码</td><td style="padding:4px 10px;border:1px solid #e2e8f0;">销售合同</td></tr>
             <tr><td style="padding:4px 10px;border:1px solid #e2e8f0;"><code>{attachment}</code></td><td style="padding:4px 10px;border:1px solid #e2e8f0;">附件：整份报价单，打印时<strong>自动另起一页</strong>（版式取自报价单模板）</td><td style="padding:4px 10px;border:1px solid #e2e8f0;">销售合同</td></tr>
             </tbody>
         </table>

@@ -96,10 +96,10 @@ if (trim((string)($contract['party_a_sign'] ?? '')) === '') {
         '签约日期' => $contract['sign_date'] ?? '',
     ]);
 }
+// 乙方签章为空时兜底生成。账号/开户行不再单独存字段（已由「签章预设」整体带进 party_b_sign），
+// 这里只补公司电话和签约日期
 if (trim((string)($contract['party_b_sign'] ?? '')) === '') {
     $contract['party_b_sign'] = contract_party_sign('乙方', [
-        '账号号码' => $contract['bank_account'] ?? '',
-        '开户行'   => $contract['bank_name'] ?? '',
         '联系电话' => $companyPhone,
         '签约日期' => $contract['sign_date'] ?? '',
     ]);
@@ -325,8 +325,6 @@ require_once __DIR__ . '/../../includes/header.php';
     </div>
     <div class="form-row">
         <div class="form-group"><label class="form-label">技术支持热线</label><div><?= htmlspecialchars($contract['hotline'] ?: '-') ?></div></div>
-        <div class="form-group"><label class="form-label">乙方开户行</label><div><?= htmlspecialchars($contract['bank_name'] ?: '-') ?></div></div>
-        <div class="form-group"><label class="form-label">乙方账号</label><div><?= htmlspecialchars($contract['bank_account'] ?: '-') ?></div></div>
     </div>
     <?php if ($contract['terms']): ?>
     <div class="form-group"><label class="form-label">其他约定</label><div class="pre-wrap"><?= nl2br(htmlspecialchars($contract['terms'])) ?></div></div>
@@ -426,8 +424,6 @@ var printData = {
     receiver_phone: '<?= js_escape($contract['receiver_phone'] ?? '') ?>',
     warranty: '<?= js_escape($contract['warranty'] ?? '') ?>',
     tax_note: '<?= js_escape($contract['tax_note'] ?? '') ?>',
-    bank_name: '<?= js_escape($contract['bank_name'] ?? '') ?>',
-    bank_account: '<?= js_escape($contract['bank_account'] ?? '') ?>',
     party_a_info: '<?= js_escape($contract['party_a_info'] ?? '') ?>',
     party_b_info: '<?= js_escape($contract['party_b_info'] ?? '') ?>',
     party_a_sign: '<?= js_escape($contract['party_a_sign'] ?? '') ?>',

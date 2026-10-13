@@ -54,9 +54,27 @@ if ($trackingCode) {
 $stmt2 = $pdo->prepare("SELECT i.*, p.name as product_name, p.sku, p.spec, p.image as product_image, p.description as product_description, u.name as unit_name FROM sales_order_items i JOIN products p ON i.product_id=p.id LEFT JOIN units u ON p.unit_id=u.id WHERE i.order_id=?");
 $stmt2->execute([$id]);
 $items = $stmt2->fetchAll();
+// 本订单的收款记录：一笔收款一行（含用途与备注），已作废的自动排除。
+// 按核销明细关联，支持一单分多次收款；alloc_amount 是这笔落到本订单上的金额。
+$stmtR = $pdo->prepare("SELECT r.id, r.bill_no, r.amount, r.pay_method, r.receipt_date, r.purpose, r.remark,
+        COALESCE((SELECT SUM(a.amount) FROM receipt_allocations a WHERE a.receipt_id=r.id AND a.order_id=?),0) AS alloc_amount
+    FROM receipts r
+    WHERE r.status='confirmed'
+      AND EXISTS (SELECT 1 FROM receipt_allocations a2 WHERE a2.receipt_id=r.id AND a2.order_id=?)
+    ORDER BY r.receipt_date DESC, r.id DESC");
+$stmtR->execute([$id, $id]);
+$receipts = $stmtR->fetchAll();
+$receiptTotal = 0.0;
+foreach ($receipts as $r) { $receiptTotal += floatval($r['alloc_amount']); }
+$orderBalance = floatval($order['total_amount']) - floatval($order['received_amount'] ?? 0);
+$purposeLabels = ['deposit'=>'定金','balance'=>'尾款','progress'=>'进度款','other'=>'其他'];
+$payMethodLabels = ['bank'=>'银行转账','cash'=>'现金','wechat'=>'微信','alipay'=>'支付宝','other'=>'其他'];
+// 该客户名下的预收款余额：登记收款时可一键抵扣本订单待收款
+$customerPrepay = get_customer_prepay(intval($order['customer_id']));
+
 // 商品图片【不在服务端转 base64】：图片多/大时会使页面 HTML 暴涨，导致详情页加载卡顿。
 // 首屏只输出图片路径，打印/导出时再由前端按需转成压缩后的 dataURL（见 assets/js/print-image.js）
-$statusLabels = ['draft'=>'可编辑','confirmed'=>'已锁定','shipped'=>'已出库'];
+$statusLabels = ['draft'=>'可编辑','confirmed'=>'已锁定','shipped'=>'已出库','cancelled'=>'已取消'];
 
 // 确保打印模板表存在且模板已更新到最新版本
 ensure_print_templates_table($pdo);
@@ -164,7 +182,13 @@ $companyPhone = $pdo->query("SELECT setting_value FROM system_settings WHERE set
 <div class="card">
     <div class="card-header">
         <h3 class="card-title">销售订单 #<?= $order['bill_no'] ?></h3>
-        <span class="badge badge-<?= ['draft'=>'warning','confirmed'=>'info','shipped'=>'success'][$order['status']] ?>"><?= $statusLabels[$order['status']] ?></span>
+        <span class="badge badge-<?= ['draft'=>'warning','confirmed'=>'info','shipped'=>'success','cancelled'=>'gray'][$order['status']] ?? 'gray' ?>"><?= $statusLabels[$order['status']] ?? $order['status'] ?></span>
+        <?php if ($order['status'] !== 'cancelled' && get_user_role() === 'admin'): ?>
+        <a href="order_cancel.php?id=<?= intval($order['id']) ?>" class="btn btn-sm btn-outline" style="color:var(--danger);border-color:var(--danger);">取消订单</a>
+        <?php endif; ?>
+        <?php if ($order['status'] === 'cancelled' && !empty($order['cancel_reason'])): ?>
+        <span style="font-size:12px;color:var(--danger);margin-left:8px;">取消原因：<?= htmlspecialchars($order['cancel_reason']) ?></span>
+        <?php endif; ?>
     </div>
     <div class="card-body">
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-bottom:20px;">
@@ -174,6 +198,7 @@ $companyPhone = $pdo->query("SELECT setting_value FROM system_settings WHERE set
             <div><strong>订单日期：</strong><?= $order['order_date'] ?></div>
             <div><strong>预计交货：</strong><?= $order['delivery_date']?:'-' ?></div>
             <div><strong>已收金额：</strong><span style="color:var(--success)">¥<?= format_money($order['received_amount']) ?></span></div>
+            <div><strong>待收金额：</strong><span style="color:var(--warning);font-weight:bold;">¥<?= format_money(max(0, $orderBalance)) ?></span></div>
         </div>
         <div class="table-container"><table>
             <thead><tr><th style="width:52px;">图片</th><th>#</th><th>SKU</th><th>商品名称</th><th>规格</th><th>单位</th><th>数量</th><th>单价</th><th>金额</th><th>备注</th></tr></thead>
@@ -194,6 +219,42 @@ $companyPhone = $pdo->query("SELECT setting_value FROM system_settings WHERE set
         </table></div>
         <?php if ($order['remark']): ?><div class="mt-2"><strong>总备注：</strong><?= nl2br(htmlspecialchars($order['remark'])) ?></div><?php endif; ?>
     </div>
+</div>
+
+<!-- 收款记录：一单一目了然，定金/尾款分几次收的一看就懂 -->
+<div class="card">
+    <div class="card-header">
+        <h3 class="card-title">收款记录</h3>
+        <span style="font-size:13px;color:var(--gray-600);">订单金额 ¥<?=format_money($order['total_amount'])?> ｜ 已收 <strong style="color:var(--success)">¥<?=format_money($order['received_amount'])?></strong> ｜ 待收 <strong style="color:var(--warning)">¥<?=format_money(max(0,$orderBalance))?></strong></span>
+    </div>
+    <div class="card-body" style="padding:0;"><div class="table-container">
+        <?php if ($customerPrepay > 0.005): ?>
+        <div style="padding:10px 12px;font-size:13px;background:var(--gray-100);">
+            该客户名下有预收款 <strong style="color:var(--success)">¥<?=format_money($customerPrepay)?></strong>，登记收款时可一键抵扣本订单待收款。
+        </div>
+        <?php endif; ?>
+        <table>
+            <thead><tr><th>收款单号</th><th>日期</th><th>本次收款</th><th>其中冲抵本单</th><th>用途</th><th>方式</th><th>备注</th></tr></thead>
+            <tbody>
+            <?php if ($receipts): foreach ($receipts as $r): ?>
+                <tr>
+                    <td><a href="../finance/receive.php" style="color:var(--primary);"><?=htmlspecialchars($r['bill_no'])?></a></td>
+                    <td><?=htmlspecialchars($r['receipt_date'])?></td>
+                    <td>¥<?=format_money($r['amount'])?></td>
+                    <td style="color:var(--success);">¥<?=format_money($r['alloc_amount'])?></td>
+                    <td><?php $p=$r['purpose']??''; if ($p!=='' && isset($purposeLabels[$p])): ?><span class="badge badge-<?= $p==='deposit'?'warning':($p==='balance'?'info':'gray') ?>"><?=$purposeLabels[$p]?></span><?php else: ?><span style="color:var(--gray-500);">—</span><?php endif; ?></td>
+                    <td><?=$payMethodLabels[$r['pay_method']] ?? htmlspecialchars($r['pay_method'])?></td>
+                    <td style="white-space:pre-line;"><?=htmlspecialchars($r['remark'] ?: '-')?></td>
+                </tr>
+            <?php endforeach; else: ?>
+                <tr><td colspan="7"><div class="empty-state"><i class="fa-solid fa-money-bill-wave"></i><p>暂无收款记录</p></div></td></tr>
+            <?php endif; ?>
+            </tbody>
+            <?php if ($receipts): ?>
+            <tfoot><tr><td colspan="3" class="text-right"><strong>合计：</strong></td><td><strong>¥<?=format_money($receiptTotal)?></strong></td><td colspan="3"></td></tr></tfoot>
+            <?php endif; ?>
+        </table>
+    </div></div>
 </div>
 
 <!-- 打印区域 -->

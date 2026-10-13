@@ -426,6 +426,89 @@ function run_migrations() {
                         SET ci.actual_qty = NULL
                         WHERE c.status = 'draft' AND ci.actual_qty = 0 AND ci.diff_qty = 0");
         },
+
+        // ========== 首页看板数据隔离：新增两个「数据范围」权限码 ==========
+        // 新权限码默认谁都没有，而老角色原本是能看到全部数据的，直接收紧等于「功能消失」。
+        // 所以按岗位一次性回填：admin 全给；finance 要核全公司应收/账龄，给 sales_view_all；
+        // viewer（只读账号，一般是老板）两个都给；sales/warehouse/purchase 不给 —— 只看归属自己的客户。
+        // 只执行一次（记录在 _migrations），之后管理员在「系统管理-角色权限」手工改动不会被覆盖回来。
+        'roles_perm_dashboard_scope' => function ($pdo) {
+            $grant = [
+                'admin'   => ['crm_view_all', 'sales_view_all'],
+                'finance' => ['sales_view_all'],
+                'viewer'  => ['crm_view_all', 'sales_view_all'],
+            ];
+            $st = $pdo->query("SELECT id, name, permissions FROM roles");
+            foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                $add = $grant[$r['name'] ?? ''] ?? null;
+                if (!$add) continue;
+                $perms = json_decode($r['permissions'] ?: '[]', true);
+                if (!is_array($perms)) $perms = [];
+                $changed = false;
+                foreach ($add as $code) {
+                    if (!in_array($code, $perms, true)) { $perms[] = $code; $changed = true; }
+                }
+                if ($changed) {
+                    $pdo->prepare("UPDATE roles SET permissions=? WHERE id=?")
+                        ->execute([json_encode($perms, JSON_UNESCAPED_UNICODE), $r['id']]);
+                }
+            }
+        },
+
+        // ========== 销售合同：乙方签章预设 ==========
+        // 合同的「签章 · 乙方」是一整块自由文本（开户行/账号/户名怎么排都行），
+        // 所以预设只存一个文本框，不拆字段；管理员维护，合同编辑页下拉一键填入。
+        // is_default=1 的那条在新建合同时自动带出（各业务员第一次建合同不用手动选）。
+        'contract_sign_presets_table' =>
+            "CREATE TABLE IF NOT EXISTS `contract_sign_presets` (
+                `id` INT AUTO_INCREMENT PRIMARY KEY,
+                `name` VARCHAR(100) NOT NULL COMMENT '预设名称（下拉显示用）',
+                `content` TEXT COMMENT '乙方签章文本（整块，支持换行）',
+                `is_default` TINYINT NOT NULL DEFAULT 0 COMMENT '是否默认预设（新建合同时自动带出）',
+                `sort` INT NOT NULL DEFAULT 0,
+                `status` TINYINT NOT NULL DEFAULT 1,
+                `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='销售合同乙方签章预设'",
+
+        // ========== 销售合同：去掉乙方开户行 / 账号号码 ==========
+        // 账号信息改由「签章预设」整体带进 party_b_sign，不再单独录入，避免两处打架。
+        // 用闭包：DROP COLUMN 在列已不存在时会报 1091，错误文案不含「already exists」，
+        // 走字符串迁移的兜底会被当成失败、每次请求都重试一遍；先查 information_schema 才稳。
+        'sales_contracts_drop_bank_cols' => function ($pdo) {
+            $st = $pdo->prepare("SELECT COLUMN_NAME FROM information_schema.COLUMNS
+                                 WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'sales_contracts'
+                                   AND COLUMN_NAME IN ('bank_name','bank_account')");
+            $st->execute();
+            $exists = $st->fetchAll(PDO::FETCH_COLUMN);
+            if (!$exists) return;
+            // 逐列 DROP：不同 MySQL 版本对一次 DROP 多列里「其中一列不存在」的处理不一致
+            foreach ($exists as $col) {
+                $pdo->exec("ALTER TABLE sales_contracts DROP COLUMN `$col`");
+            }
+        },
+        // 配套清理：合同打印模板里如果还留着这两个变量，前端替换表已没有对应键，
+        // 打印出来会原样显示「{bank_name}」。用 REPLACE 抹掉（幂等，模板里没有则不变更）。
+        'sales_contract_tpl_drop_bank_vars' =>
+            "UPDATE print_templates
+             SET content = REPLACE(REPLACE(content, '{bank_name}', ''), '{bank_account}', '')
+             WHERE content LIKE '%{bank_name}%' OR content LIKE '%{bank_account}%'",
+
+        // ========== 收款用途（定金/尾款/进度款/其他）==========
+        // 收款备注是可自由填写的文本，拿它做「这笔钱是定金还是尾款」的统计不可靠，
+        // 所以单独加一个受控字段；老数据为空，列表里按「—」显示，不影响既有流水。
+        'receipts_purpose' =>
+            "ALTER TABLE receipts
+             ADD COLUMN IF NOT EXISTS purpose VARCHAR(20) NOT NULL DEFAULT '' COMMENT 'deposit=定金 balance=尾款 progress=进度款 other=其他'",
+
+        // ========== 退款红冲指向的原核销行 ==========
+        // 退款不新增 receipts 主表记录（避免影响既有收款汇总口径），而是在同一张收款单下
+        // 新增一条负数核销行，用 refund_of 指回被退的那一行，这样：
+        //   1) 「这笔钱还剩多少没退」能精确算出来，支持同一笔多次部分退款；
+        //   2) 退款的来龙去脉可查（预付池流水页、订单收款明细都按它串起来）。
+        // 老数据 refund_of=0，表示原始核销行，不受影响。
+        'receipt_allocations_refund_of' =>
+            "ALTER TABLE receipt_allocations
+             ADD COLUMN IF NOT EXISTS refund_of INT NOT NULL DEFAULT 0 COMMENT '退款红冲指向的原核销行ID，0=原始核销行'",
     ];
     
     // 执行未完成的迁移

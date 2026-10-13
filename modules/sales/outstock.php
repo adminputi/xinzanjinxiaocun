@@ -42,12 +42,13 @@ $products = $pdo->query("SELECT id,sku,name,spec,sale_price,(SELECT name FROM un
 $fromOrder = null; $fromItems = [];
 if (isset($_GET['from_order']) && intval($_GET['from_order']) > 0) {
     $oid = intval($_GET['from_order']);
-    // 检查是否已经出库过
-    $stmt = $pdo->prepare("SELECT id FROM sales_outstocks WHERE order_id=? LIMIT 1");
+    // 检查是否已经出库过：
+    // 只拦「有效出库单」——已撤销的（status='cancelled'）允许重新出库，否则撤销后这张订单永远出不了货
+    $stmt = $pdo->prepare("SELECT id, bill_no FROM sales_outstocks WHERE order_id=? AND status='confirmed' LIMIT 1");
     $stmt->execute([$oid]);
     $existingOutstock = $stmt->fetch();
     if ($existingOutstock) {
-        $error = '该订单已出库，单号：'.$existingOutstock['id'].'，不允许重复出库';
+        $error = '该订单已出库，单号：' . htmlspecialchars($existingOutstock['bill_no']) . '，不允许重复出库（如需重出，请先撤销该出库单）';
     } else {
         $stmt = $pdo->prepare("SELECT o.*, c.name as customer_name, c.id as cid, u.real_name as emp_name, u.phone as emp_phone FROM sales_orders o LEFT JOIN customers c ON o.customer_id=c.id LEFT JOIN users u ON o.employee_id=u.id WHERE o.id=?");
         $stmt->execute([$oid]);
@@ -137,7 +138,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'save') 
 
 }
 
-// 撤销出库（删除出库记录+恢复库存+恢复订单状态）
+// 撤销出库（恢复库存 + 出库单置「已撤销」留痕 + 订单回到已确认）仅admin，原因必填
+// Q1=B：不再物理删除，避免「出了库又撤」的痕迹在单据层面彻底消失
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'undo') {
     csrf_verify();
     if (!$isAdmin) die('无权限');
@@ -146,27 +148,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'undo') 
     $stmt = $pdo->prepare("SELECT * FROM sales_outstocks WHERE id=?");
     $stmt->execute([$oid]);
     $outstock = $stmt->fetch();
-    if ($outstock && $outstock['status']=='confirmed') {
+    if (!$outstock) {
+        flash_set('出库单不存在');
+    } elseif ($outstock['status'] !== 'confirmed') {
+        flash_set('该出库单已撤销，无需重复操作');
+    } elseif ($cancelReason === '') {
+        flash_set('撤销出库必须填写原因');
+    } else {
         $pdo->beginTransaction();
         try {
-            $stmt = $pdo->prepare("SELECT * FROM sales_outstock_items WHERE outstock_id=?");
-            $stmt->execute([$oid]);
-            $items = $stmt->fetchAll();
-            // 恢复库存（反向）
-            foreach ($items as $item) {
-                update_inventory($item['product_id'], $outstock['warehouse_id'], $item['quantity'], 'in', $outstock['bill_no'], 'sales_outstock_undo', get_user_id(), '撤销出库恢复库存');
-            }
-            // 删除出库明细和出库单
-            $pdo->prepare("DELETE FROM sales_outstock_items WHERE outstock_id=?")->execute([$oid]);
-            $orderId = intval($outstock['order_id']??0);
-            $pdo->prepare("DELETE FROM sales_outstocks WHERE id=?")->execute([$oid]);
-            // 恢复关联订单为已锁定状态
-            if ($orderId > 0) {
-                $pdo->prepare("UPDATE sales_orders SET status='confirmed' WHERE id=?")->execute([$orderId]);
-            }
-            add_log(get_user_id(), 'undo', 'sales_outstock', "撤销出库并删除出库单: {$outstock['bill_no']}，原因：{$cancelReason}，库存已恢复");
+            undo_sales_outstock($oid, $cancelReason);
             $pdo->commit();
-        } catch (Exception $e) { $pdo->rollBack(); error_log('Undo outstock error: '.$e->getMessage()); $error = '撤销失败，请稍后重试'; }
+            flash_set('已撤销出库 ' . $outstock['bill_no'] . '：库存已恢复，出库单留痕保留', 'success');
+        } catch (Exception $e) {
+            $pdo->rollBack();
+            error_log('Undo outstock error: '.$e->getMessage());
+            flash_set('撤销出库失败：' . $e->getMessage());
+        }
     }
     redirect('outstock.php');
 }
@@ -177,6 +175,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'undo') 
     <h1 class="page-title"><i class="fa-solid fa-truck-fast"></i> 销售出库</h1>
     <button class="btn btn-primary" onclick="openOutModal()"><i class="fa-solid fa-plus"></i> 新增出库单</button>
 </div>
+<?php flash_show(); ?>
 <?php if (isset($error)): ?><div class="alert alert-danger"><?= $error ?></div><?php endif; ?>
 
 <form class="filter-bar" method="get">
@@ -186,7 +185,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'undo') 
 
 <div class="card"><div class="card-body" style="padding:0;"><div class="table-container">
 <table>
-<thead><tr><th>单号</th><th>客户</th><th>仓库</th><th>金额</th><th>日期</th><th>业务员</th><th>操作</th></tr></thead>
+<thead><tr><th>单号</th><th>客户</th><th>仓库</th><th>金额</th><th>日期</th><th>业务员</th><th>状态</th><th>操作</th></tr></thead>
 <tbody>
 <?php if ($list): foreach ($list as $item): ?>
 <tr>
@@ -196,16 +195,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'undo') 
     <td><strong>¥<?=format_money($item['total_amount'])?></strong></td>
     <td><?=$item['outstock_date']?></td>
     <td><?=htmlspecialchars($item['salesperson_name']?:'-')?></td>
+    <td><?php if ($item['status']==='cancelled'): ?><span class="badge badge-danger" title="已撤销，库存已恢复，不计入已出库">已撤销</span><?php else: ?><span class="badge badge-success">已出库</span><?php endif; ?></td>
     <td>
         <a href="outstock_view.php?id=<?=$item['id']?>" class="btn btn-sm btn-outline" title="详情"><i class="fa-solid fa-eye"></i></a>
         <a href="outstock_view.php?id=<?=$item['id']?>&print=1" class="btn btn-sm btn-outline" title="打印出库单"><i class="fa-solid fa-print"></i></a>
         <?php if ($item['status']=='confirmed' && $isAdmin): ?>
-        <a href="javascript:void(0)" class="btn btn-sm btn-outline" title="撤销出库（恢复库存并删除出库记录）" style="color:var(--warning)" onclick="showUndoModal(<?=$item['id']?>,'<?=$item['bill_no']?>')"><i class="fa-solid fa-rotate-left"></i></a>
+        <a href="javascript:void(0)" class="btn btn-sm btn-outline" title="撤销出库（恢复库存，出库单置已撤销留痕）" style="color:var(--warning)" onclick="showUndoModal(<?=$item['id']?>,'<?=$item['bill_no']?>')"><i class="fa-solid fa-rotate-left"></i></a>
         <?php endif; ?>
     </td>
 </tr>
 <?php endforeach; else: ?>
-<tr><td colspan="7"><div class="empty-state"><i class="fa-solid fa-truck-fast"></i><p>暂无出库记录</p></div></td></tr>
+<tr><td colspan="8"><div class="empty-state"><i class="fa-solid fa-truck-fast"></i><p>暂无出库记录</p></div></td></tr>
 <?php endif; ?>
 </tbody>
 </table></div></div></div>

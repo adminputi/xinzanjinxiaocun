@@ -8,7 +8,7 @@
  * 注意：README.md、CHANGELOG.md 里的版本号属于文档正文，仍需手动同步
  */
 if (!defined('APP_VERSION')) {
-    define('APP_VERSION', 'V1.3.2');
+    define('APP_VERSION', 'V1.3.3');
 }
 
 require_once __DIR__ . '/../config/database.php';
@@ -593,6 +593,10 @@ function perm_code_list() {
         'tracking_view' => '追踪码查看（列表/查询/二维码）', 'tracking_edit' => '追踪码编辑（生成/编辑/加流程/加售后）',
         'tracking_status' => '追踪状态管理（默认仅管理员）',
         'tracking_all' => '追踪码查看全部（不受客户归属限制，默认仅管理员）',
+        // 数据范围类权限：与 tracking_all 同一套路，只是分成 CRM / 销售两条线，方便分开授权。
+        // 不勾的人默认只能看「归属自己的客户」的数据，勾了才是全公司 —— 主要影响首页看板
+        'crm_view_all' => 'CRM数据查看全部（不受客户归属限制，默认仅管理员）',
+        'sales_view_all' => '销售数据查看全部（不受客户归属限制，默认仅管理员）',
     ];
 }
 
@@ -632,6 +636,46 @@ function check_tracking_all() {
     if (!isset($_SESSION['user_id'])) return false;
     if (($_SESSION['user_role'] ?? '') === 'admin') return true;
     return check_permission('tracking_all');
+}
+
+/**
+ * CRM 数据是否可看全公司（不受客户归属限制）
+ * 管理员直通；其余角色默认只看「归属自己的客户」，如需放开（如销售主管）
+ * 可在角色权限中勾选 crm_view_all。
+ */
+function check_crm_all() {
+    if (!isset($_SESSION['user_id'])) return false;
+    if (($_SESSION['user_role'] ?? '') === 'admin') return true;
+    return check_permission('crm_view_all');
+}
+
+/**
+ * 销售数据（业绩、应收、销售趋势等）是否可看全公司
+ * 与 check_crm_all() 同一套路，用 sales_view_all 单独控制，
+ * 方便做到「财务能看全部应收，但看不到 CRM 客户资料」这种组合。
+ */
+function check_sales_all() {
+    if (!isset($_SESSION['user_id'])) return false;
+    if (($_SESSION['user_role'] ?? '') === 'admin') return true;
+    return check_permission('sales_view_all');
+}
+
+/**
+ * 客户数据的数据范围条件（按客户归属隔离）—— CRM / 销售 / 追踪三条线共用
+ *
+ * 口径：一律按 customers.owner_id（客户归属经理）判断，与 CRM 各页面保持一致。
+ * 销售单据本身没有归属字段，调用方需自己 JOIN 到 customers 再套用本条件：
+ *   LEFT JOIN customers c ON c.id = o.customer_id
+ *
+ * @param bool   $seeAll 是否能看全部（check_crm_all() / check_sales_all() 的结果）
+ * @param string $alias  customers 表的别名，按调用方 SQL 里的实际别名传
+ * @return array ['where' => ' AND ...', 'params' => array] 直接拼在 WHERE 1=1 之后
+ */
+function owner_scope_where($seeAll, $alias = 'c') {
+    if (!isset($_SESSION['user_id'])) return ['where' => ' AND 1=0', 'params' => []];
+    if ($seeAll) return ['where' => '', 'params' => []];
+    // 未分配归属的客户（owner_id 为 NULL）仅管理员可见，与 CRM/销售/追踪模块保持一致
+    return ['where' => " AND $alias.owner_id = ?", 'params' => [get_user_id()]];
 }
 
 /**
@@ -895,6 +939,12 @@ function follow_plan_status($nextFollowAt, $result = null, $doneAfterAt = null) 
  *
  * 紧跟 **1 个**绑定参数：明天 0 点，用 follow_tomorrow_start() 取
  *
+ * 「跟进过了不再算待跟进」的判定（2026-10-12 修正）：
+ * 旧逻辑比较「新跟进时间 > 本条的计划时间」，漏了一种情况 —— 计划是今天 15:00、
+ * 业务员上午 10:00 就跟进过了，10:00 不大于 15:00，旧计划整天挂在待跟进里还标红。
+ * 改成：只要该客户之后还有**任何**更新的跟进记录（按 created_at+id 比较），
+ * 本条计划就视为已被取代，不再计入。即「待跟进」只会挂在客户**最后一条**跟进记录上。
+ *
  * @param string $alias customer_followups 的别名
  */
 function sql_follow_pending($alias = 'f') {
@@ -902,7 +952,9 @@ function sql_follow_pending($alias = 'f') {
         . " AND {$alias}.next_follow_at < ?"
         . " AND {$alias}.result != '已成交'"
         . " AND NOT EXISTS (SELECT 1 FROM customer_followups f2"
-        .                  " WHERE f2.customer_id = {$alias}.customer_id AND f2.created_at > {$alias}.next_follow_at)";
+        .                  " WHERE f2.customer_id = {$alias}.customer_id"
+        .                  " AND (f2.created_at > {$alias}.created_at"
+        .                  "   OR (f2.created_at = {$alias}.created_at AND f2.id > {$alias}.id)))";
 }
 
 /** sql_follow_pending() 要绑定的时间：明天 0 点（今天全天 + 已逾期都 < 它） */
@@ -1655,6 +1707,7 @@ function get_menu() {
         ['name' => '财务管理', 'icon' => 'dollar-sign', 'perm' => 'finance', 'children' => [
             ['name' => '应收应付', 'url' => 'modules/finance/arpay.php', 'icon' => 'book-open', 'perm' => 'finance_arpay'],
             ['name' => '收款记录', 'url' => 'modules/finance/receive.php', 'icon' => 'arrow-trend-up', 'perm' => 'finance_receive'],
+            ['name' => '预收款流水', 'url' => 'modules/finance/prepay.php', 'icon' => 'piggy-bank', 'perm' => 'finance_receive'],
             ['name' => '付款记录', 'url' => 'modules/finance/payment.php', 'icon' => 'arrow-trend-down', 'perm' => 'finance_payment'],
             ['name' => '账龄分析', 'url' => 'modules/finance/aging.php', 'icon' => 'clock', 'perm' => 'finance_aging'],
         ]],
@@ -2036,6 +2089,9 @@ function get_ar_by_customer($customerId = 0, $options = []) {
     $dateFrom = trim($options['date_from'] ?? '');
     $dateTo   = trim($options['date_to'] ?? '');
     $userId   = intval($options['user_id'] ?? 0);
+    // 按「客户归属经理」过滤（首页看板数据隔离用，0=不过滤）。
+    // 注意与 user_id 区分：user_id 是单据创建人，owner_user_id 是客户的归属业务员
+    $ownerUserId = intval($options['owner_user_id'] ?? 0);
 
     // 1) 订单维度聚合（不含退货、期初）
     $w = "status NOT IN ('draft','cancelled')";
@@ -2043,6 +2099,7 @@ function get_ar_by_customer($customerId = 0, $options = []) {
     if ($customerId > 0) { $w .= " AND customer_id=?"; $params[] = $customerId; }
     if ($dateFrom !== '' && $dateTo !== '') { $w .= " AND order_date BETWEEN ? AND ?"; $params[] = $dateFrom; $params[] = $dateTo; }
     if ($userId > 0) { $w .= " AND user_id=?"; $params[] = $userId; }
+    if ($ownerUserId > 0) { $w .= " AND customer_id IN (SELECT id FROM customers WHERE owner_id=?)"; $params[] = $ownerUserId; }
     $st = $pdo->prepare("SELECT customer_id,
             COUNT(*) as order_count,
             COALESCE(SUM(total_amount), 0) as order_total,
@@ -2071,9 +2128,12 @@ function get_ar_by_customer($customerId = 0, $options = []) {
     }
 
     // 2) 客户主档（名称 + 期初应收）
-    $cw = $customerId > 0 ? "WHERE id=?" : "";
+    $cw = "WHERE 1=1";
+    $cp = [];
+    if ($customerId > 0) { $cw .= " AND id=?"; $cp[] = $customerId; }
+    if ($ownerUserId > 0) { $cw .= " AND owner_id=?"; $cp[] = $ownerUserId; }
     $st = $pdo->prepare("SELECT id, name, code, phone, COALESCE(initial_balance,0) as initial_balance FROM customers $cw");
-    $st->execute($customerId > 0 ? [$customerId] : []);
+    $st->execute($cp);
     $cust = [];
     foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $c) { $cust[intval($c['id'])] = $c; }
     foreach ($cust as $cid => $c) {
@@ -2095,6 +2155,7 @@ function get_ar_by_customer($customerId = 0, $options = []) {
     if ($customerId > 0) { $rw .= " AND customer_id=?"; $rp[] = $customerId; }
     if ($dateFrom !== '' && $dateTo !== '') { $rw .= " AND return_date BETWEEN ? AND ?"; $rp[] = $dateFrom; $rp[] = $dateTo; }
     if ($userId > 0) { $rw .= " AND user_id=?"; $rp[] = $userId; }
+    if ($ownerUserId > 0) { $rw .= " AND customer_id IN (SELECT id FROM customers WHERE owner_id=?)"; $rp[] = $ownerUserId; }
     $st = $pdo->prepare("SELECT customer_id, COALESCE(SUM(total_amount),0) as amt FROM sales_returns WHERE $rw GROUP BY customer_id");
     $st->execute($rp);
     foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
@@ -2122,10 +2183,11 @@ function get_ar_by_customer($customerId = 0, $options = []) {
 /**
  * 应收全局汇总（首页看板用），由 get_ar_by_customer 求和，保证与应收应付/账龄完全一致
  */
-function get_ar_totals() {
+function get_ar_totals($options = []) {
     $t = ['order_total'=>0,'received'=>0,'initial'=>0,'returns'=>0,'balance'=>0,
           'within30'=>0,'within60'=>0,'within90'=>0,'over90'=>0,'order_count'=>0,'customer_count'=>0];
-    foreach (get_ar_by_customer(0) as $r) {
+    // $options 透传给 get_ar_by_customer；不传参时与原来完全一致（全公司口径）
+    foreach (get_ar_by_customer(0, $options) as $r) {
         foreach (['order_total','received','initial','returns','balance','within30','within60','within90','over90'] as $k) {
             $t[$k] += $r[$k];
         }
@@ -2260,6 +2322,85 @@ function sync_order_received($orderId) {
 }
 
 /**
+ * 客户的「可用预收款」余额
+ * 口径：该客户所有未核销（order_id=0）的收款核销明细之和；已作废的收款单自动排除。
+ * 这是全站唯一的预收款余额口径，任何地方要显示/校验预收款都调它。
+ *
+ * @param int $customerId
+ * @return float
+ */
+function get_customer_prepay($customerId) {
+    $pdo = getDB();
+    $customerId = intval($customerId);
+    if ($customerId <= 0) return 0.0;
+    $st = $pdo->prepare("SELECT COALESCE(SUM(a.amount),0) FROM receipt_allocations a
+        JOIN receipts r ON r.id = a.receipt_id
+        WHERE a.customer_id=? AND a.order_id=0 AND r.status='confirmed'");
+    $st->execute([$customerId]);
+    return max(0.0, floatval($st->fetchColumn()));
+}
+
+/**
+ * 用客户的预收款核销指定销售订单（收款弹窗里「资金来源=预收款抵扣」走这里）
+ *
+ * 设计要点：
+ * 1. **不新增收款流水** —— 钱早就收了，只是把它的归属从「客户预收池」改挂到某张订单上，
+ *    所以 receipts 主表不动，只改 receipt_allocations 的 order_id；
+ * 2. 按 id 顺序（先收款的先用掉）从预收池里取额度，最后一条若金额大于所需则**拆行**：
+ *    本行留下的仍是预收款，超出部分（即本次所需）另建一条挂到订单上，拆分前后总额不变；
+ * 3. 金额不足直接抛异常，由调用方回滚事务；成功后重算订单已收金额。
+ *
+ * 调用方需自行开启/提交事务。
+ *
+ * @param int   $customerId
+ * @param int   $orderId   目标销售订单
+ * @param float $amount    本次要用预收款抵扣的金额
+ * @return float 实际转移金额（正常等于 $amount）
+ */
+function transfer_prepay_to_order($customerId, $orderId, $amount) {
+    $pdo = getDB();
+    $customerId = intval($customerId);
+    $orderId    = intval($orderId);
+    $amount     = round(floatval($amount), 2);
+    if ($orderId <= 0)   { throw new Exception('预收款抵扣必须指定具体订单'); }
+    if ($amount <= 0.01) { throw new Exception('预收款抵扣金额必须大于0'); }
+    $available = get_customer_prepay($customerId);
+    if ($amount - $available > 0.01) {
+        throw new Exception('该客户可用预收款 ¥' . format_money($available) . '，不足本次抵扣 ¥' . format_money($amount));
+    }
+
+    $st = $pdo->prepare("SELECT a.id, a.amount, a.receipt_id FROM receipt_allocations a
+        JOIN receipts r ON r.id = a.receipt_id
+        WHERE a.customer_id=? AND a.order_id=0 AND a.amount>0 AND r.status='confirmed'
+        ORDER BY a.id ASC");
+    $st->execute([$customerId]);
+
+    $remaining = $amount;
+    foreach ($st->fetchAll() as $row) {
+        if ($remaining <= 0.005) break;
+        $rowAmt = floatval($row['amount']);
+        if ($rowAmt <= $remaining + 0.005) {
+            // 整行转移
+            $pdo->prepare("UPDATE receipt_allocations SET order_id=? WHERE id=?")
+                ->execute([$orderId, $row['id']]);
+            $remaining = round($remaining - $rowAmt, 2);
+        } else {
+            // 拆行：本行只保留剩余预收款，挪走的部分另开一条挂到订单上
+            $pdo->prepare("UPDATE receipt_allocations SET amount=? WHERE id=?")
+                ->execute([round($rowAmt - $remaining, 2), $row['id']]);
+            $pdo->prepare("INSERT INTO receipt_allocations (receipt_id,customer_id,order_id,amount,remark,user_id,created_at) VALUES (?,?,?,?,?,?,NOW())")
+                ->execute([$row['receipt_id'], $customerId, $orderId, $remaining, '预收款核销订单', get_user_id()]);
+            $remaining = 0;
+        }
+    }
+    if ($amount - $remaining <= 0.01 && $remaining > 0.005) {
+        throw new Exception('预收款抵扣失败：资金余额不足，请重试');
+    }
+    sync_order_received($orderId);
+    return round($amount - $remaining, 2);
+}
+
+/**
  * 采购订单「已付金额」重算（与 sync_order_received 对称）
  */
 function sync_purchase_order_paid($orderId) {
@@ -2388,4 +2529,326 @@ function build_product_filter() {
         $params[] = $categoryId;
     }
     return ['search' => $search, 'category_id' => $categoryId, 'cond' => $cond, 'params' => $params];
+}
+
+/* =====================================================================
+ * 统一的「业务是否已发生」判定 与 收退款账目动作
+ * ---------------------------------------------------------------------
+ * 全系统只有一条锁定口径：存在 status='confirmed' 的销售出库单才算「已出库」。
+ * 已撤销的出库单（status='cancelled'）不算，所以撤销出库后合同自动解锁。
+ *
+ * 所有金额变动都必须走这里的函数，禁止在页面里直接 UPDATE received_amount、
+ * 直接改 allocation 的 order_id —— 那正是过去「收款记录有了、订单已收还是 0」
+ * 这类对不上账的根源。函数内部依赖 sync_order_received() 作为唯一重算入口。
+ * ===================================================================== */
+
+/**
+ * 订单是否已出库发货（已撤销的不算）
+ */
+function order_has_delivery($orderId) {
+    $pdo = getDB();
+    $orderId = intval($orderId);
+    if ($orderId <= 0) return false;
+    $st = $pdo->prepare("SELECT COUNT(*) FROM sales_outstocks WHERE order_id=? AND status='confirmed'");
+    $st->execute([$orderId]);
+    return intval($st->fetchColumn()) > 0;
+}
+
+/**
+ * 订单名下第一张有效出库单
+ */
+function get_order_active_outstock($orderId) {
+    $pdo = getDB();
+    $st = $pdo->prepare("SELECT * FROM sales_outstocks WHERE order_id=? AND status='confirmed' ORDER BY id ASC LIMIT 1");
+    $st->execute([intval($orderId)]);
+    $row = $st->fetch();
+    return $row ?: null;
+}
+
+/**
+ * 订单名下的出库单（含已撤销），用于详情页展示历史
+ */
+function get_order_outstocks($orderId) {
+    $pdo = getDB();
+    $st = $pdo->prepare("SELECT * FROM sales_outstocks WHERE order_id=? ORDER BY id ASC");
+    $st->execute([intval($orderId)]);
+    return $st->fetchAll();
+}
+
+/**
+ * 合同是否已发生出库：名下任一「未取消订单」存在有效出库单
+ */
+function contract_has_delivery($contractId) {
+    $pdo = getDB();
+    $contractId = intval($contractId);
+    if ($contractId <= 0) return false;
+    $st = $pdo->prepare("SELECT COUNT(*) FROM sales_outstocks o
+        JOIN sales_orders so ON so.id = o.order_id
+        WHERE so.contract_id=? AND so.status<>'cancelled' AND o.status='confirmed'");
+    $st->execute([$contractId]);
+    return intval($st->fetchColumn()) > 0;
+}
+
+/**
+ * 导致合同锁定的出库单列表，用于给用户的提示文案（要写清楚是哪张单）
+ */
+function contract_delivery_bills($contractId) {
+    $pdo = getDB();
+    $st = $pdo->prepare("SELECT o.id, o.bill_no, so.bill_no AS order_no
+        FROM sales_outstocks o
+        JOIN sales_orders so ON so.id = o.order_id
+        WHERE so.contract_id=? AND so.status<>'cancelled' AND o.status='confirmed'
+        ORDER BY o.id ASC");
+    $st->execute([intval($contractId)]);
+    return $st->fetchAll();
+}
+
+/**
+ * 某条收款核销行的「剩余可退金额」
+ * 口径：原始核销金额 − 已针对它红冲的退款合计
+ */
+function get_allocation_refundable($allocId) {
+    $pdo = getDB();
+    $allocId = intval($allocId);
+    $st = $pdo->prepare("SELECT a.*, r.status AS receipt_status
+        FROM receipt_allocations a JOIN receipts r ON r.id = a.receipt_id WHERE a.id=?");
+    $st->execute([$allocId]);
+    $alloc = $st->fetch();
+    if (!$alloc) return 0.0;
+    if (($alloc['receipt_status'] ?? '') !== 'confirmed') return 0.0;
+    if (floatval($alloc['amount']) <= 0) return 0.0; // 退款行自身不能再被退
+
+    $st = $pdo->prepare("SELECT COALESCE(SUM(a.amount),0) FROM receipt_allocations a
+        JOIN receipts r ON r.id = a.receipt_id
+        WHERE a.refund_of=? AND r.status='confirmed'");
+    $st->execute([$allocId]);
+    $refunded = abs(floatval($st->fetchColumn()));
+    return max(0.0, round(floatval($alloc['amount']) - $refunded, 2));
+}
+
+/**
+ * 订单名下尚未处理的收款明细（取消订单/退款界面据此逐笔让用户选去处）
+ * 每行附带 refundable（剩余可退金额）
+ */
+function get_order_receipt_allocations($orderId) {
+    $pdo = getDB();
+    $st = $pdo->prepare("SELECT a.id, a.amount, a.remark AS alloc_remark,
+            r.id AS receipt_id, r.bill_no, r.receipt_date, r.pay_method, r.purpose, r.remark
+        FROM receipt_allocations a
+        JOIN receipts r ON r.id = a.receipt_id
+        WHERE a.order_id=? AND r.status='confirmed' AND a.amount>0 AND a.refund_of=0
+        ORDER BY r.receipt_date ASC, a.id ASC");
+    $st->execute([intval($orderId)]);
+    $rows = $st->fetchAll();
+    foreach ($rows as $k => $row) {
+        $rows[$k]['refundable'] = get_allocation_refundable($row['id']);
+    }
+    return $rows;
+}
+
+/**
+ * 退款红冲：钱真的退回客户时走这里（区别于「作废」用于录错）
+ *
+ * 做法：在原收款单下新增一条负数核销行，refund_of 指向被退的那一行。
+ *       不新增 receipts 主表记录，避免影响既有「收款总额」统计口径；
+ *       因为 SUM(amount) 天然包含负数，订单已收与客户预收款会自动减少。
+ *
+ * 校验：Q11-b=A —— 超可退余额直接抛异常由调用方回滚，不允许退成负数。
+ * 调用方需自行开启/提交事务。
+ *
+ * @param int    $allocId  被退的原始核销行
+ * @param float  $amount   退款金额
+ * @param string $reason   退款原因
+ * @return string 退款单号
+ */
+function refund_receipt_allocation($allocId, $amount, $reason, $refundDate = null) {
+    $pdo = getDB();
+    $allocId = intval($allocId);
+    $amount  = round(floatval($amount), 2);
+    $reason  = trim((string)$reason);
+    if ($amount <= 0.01) { throw new Exception('退款金额必须大于0'); }
+    if ($reason === '')  { throw new Exception('退款必须填写原因'); }
+
+    $st = $pdo->prepare("SELECT a.*, r.bill_no AS receipt_no, r.status AS receipt_status
+        FROM receipt_allocations a JOIN receipts r ON r.id = a.receipt_id WHERE a.id=?");
+    $st->execute([$allocId]);
+    $alloc = $st->fetch();
+    if (!$alloc) { throw new Exception('要退款的收款明细不存在'); }
+    if (($alloc['receipt_status'] ?? '') !== 'confirmed') { throw new Exception('该收款单已作废，无法退款'); }
+
+    $refundable = get_allocation_refundable($allocId);
+    if ($amount - $refundable > 0.01) {
+        throw new Exception('该笔收款剩余可退 ¥' . format_money($refundable) . '，不能退 ¥' . format_money($amount));
+    }
+
+    // 整体余额也不能被退成负数（双重保护：单笔可退 + 订单/预收池余额）
+    $orderId    = intval($alloc['order_id']);
+    $customerId = intval($alloc['customer_id']);
+    if ($orderId > 0) {
+        $st = $pdo->prepare("SELECT COALESCE(received_amount,0) FROM sales_orders WHERE id=?");
+        $st->execute([$orderId]);
+        $received = floatval($st->fetchColumn());
+        if ($amount - $received > 0.01) {
+            throw new Exception('该订单已收仅 ¥' . format_money($received) . '，不能退 ¥' . format_money($amount));
+        }
+    } elseif ($customerId > 0) {
+        $available = get_customer_prepay($customerId);
+        if ($amount - $available > 0.01) {
+            throw new Exception('该客户可用预收款 ¥' . format_money($available) . '，不能退 ¥' . format_money($amount));
+        }
+    }
+
+    $billNo = generate_bill_no('TK');
+    $pdo->prepare("INSERT INTO receipt_allocations
+            (receipt_id, customer_id, order_id, amount, refund_of, remark, user_id, created_at)
+            VALUES (?,?,?,?,?,?,?,?)")
+        ->execute([
+            intval($alloc['receipt_id']), $customerId, $orderId, -$amount, $allocId,
+            "退款单 {$billNo}｜原收款单 {$alloc['receipt_no']}｜原因：{$reason}",
+            get_user_id(), $refundDate ?: date('Y-m-d H:i:s')
+        ]);
+
+    if ($orderId > 0) { sync_order_received($orderId); }
+    add_log(get_user_id(), 'refund', 'receipt',
+        "退款 {$billNo}：原收款单 {$alloc['receipt_no']} 退 ¥" . format_money($amount) . "，原因：{$reason}");
+    return $billNo;
+}
+
+/**
+ * 取消销售订单：留痕（status='cancelled'），不物理删除
+ *
+ * 前置：
+ *  1. 必须已撤销出库 —— 出库单据还在就不允许取消（先撤出库，再取消）
+ *  2. 名下每笔有效收款必须逐笔指定去处（Q2=C）：
+ *     refund = 退款红冲（钱已退给客户）；prepay = 转客户预收款（钱不退）
+ *
+ * 调用方负责 admin 权限与原因必填的界面校验，并开启/提交事务。
+ *
+ * @param int    $orderId
+ * @param string $reason
+ * @param array  $receiptActions [allocId => 'refund'|'prepay', ...]
+ */
+function cancel_sales_order($orderId, $reason, $receiptActions = []) {
+    $pdo = getDB();
+    $orderId = intval($orderId);
+    $reason  = trim((string)$reason);
+    if ($reason === '') { throw new Exception('取消订单必须填写原因'); }
+
+    $st = $pdo->prepare("SELECT * FROM sales_orders WHERE id=?");
+    $st->execute([$orderId]);
+    $order = $st->fetch();
+    if (!$order) { throw new Exception('销售订单不存在'); }
+    if ($order['status'] === 'cancelled') { throw new Exception('该订单已取消，无需重复操作'); }
+
+    if (order_has_delivery($orderId)) {
+        throw new Exception('订单已出库，请先在订单列表撤销出库后再取消订单');
+    }
+
+    // 逐笔处理名下收款，漏一笔就报错，杜绝「钱留在已取消订单上」的悬空账
+    foreach (get_order_receipt_allocations($orderId) as $a) {
+        $act = $receiptActions[$a['id']] ?? '';
+        if (!in_array($act, ['refund', 'prepay'], true)) {
+            throw new Exception('请先指定收款单 ' . $a['bill_no']
+                . '（¥' . format_money($a['amount']) . '）的处理方式：退款 或 转预收款');
+        }
+        if ($act === 'refund') {
+            refund_receipt_allocation($a['id'], $a['refundable'], $reason);
+        } else {
+            $pdo->prepare("UPDATE receipt_allocations SET order_id=0,
+                    remark = CONCAT(IFNULL(remark,''), ' | 取消订单转预收款')
+                    WHERE id=?")
+                ->execute([$a['id']]);
+        }
+    }
+
+    sync_order_received($orderId);
+    $pdo->prepare("UPDATE sales_orders SET status='cancelled', cancel_reason=? WHERE id=?")
+        ->execute([$reason, $orderId]);
+
+    rollback_upstream_on_order_cancel($pdo, $order);
+    add_log(get_user_id(), 'cancel', 'sales_order', "取消订单: {$order['bill_no']} 原因: $reason");
+    return true;
+}
+
+/**
+ * 订单作废/取消后，把上游逐级回退，否则整条链会卡死：
+ * 合同停在执行中/已完成 → 编辑不了；报价单停在「已转合同」→ 也编辑不了。
+ * 只在「该合同已无任何有效订单」时才回退，所以一份合同分多次下单、只取消其中一单不会误退。
+ * 必须在调用方的事务内执行。
+ */
+function rollback_upstream_on_order_cancel($pdo, $order) {
+    $cid = intval($order['contract_id'] ?? 0);
+    if (!$cid) return;
+
+    $st = $pdo->prepare("SELECT * FROM sales_contracts WHERE id=?");
+    $st->execute([$cid]);
+    $contract = $st->fetch();
+    if (!$contract) return;
+    // 已终止的合同不复活：终止是明确的业务动作，不该被删订单悄悄撤销
+    if (!in_array($contract['status'], ['executing', 'completed'], true)) return;
+
+    // 本单已取消，这里数的是剩下的有效订单
+    $stc = $pdo->prepare("SELECT COUNT(*) FROM sales_orders WHERE contract_id=? AND status<>'cancelled'");
+    $stc->execute([$cid]);
+    if (intval($stc->fetchColumn()) > 0) {
+        $pdo->prepare("UPDATE sales_contracts SET status='executing' WHERE id=?")->execute([$cid]);
+        return;
+    }
+
+    // 回退一级：回到「转销售订单的上一步」——已生效，可再次编辑、可再次转单
+    $pdo->prepare("UPDATE sales_contracts SET status='confirmed' WHERE id=?")->execute([$cid]);
+
+    // 再向上回退一级：报价单恢复可编辑（合同明细取自报价单，改明细要能从这里改）。
+    // 保留 contract_id 不清空——关联合同还在，且「转合同」靠它避免重复生成第二份合同
+    if (!empty($contract['quote_id'])) {
+        $pdo->prepare("UPDATE sales_quotes SET status='draft' WHERE id=? AND contract_id=? AND status='contracted'")
+            ->execute([$contract['quote_id'], $cid]);
+    }
+
+    add_log(get_user_id(), 'update', 'sales_contract',
+        "订单取消后回退上游: 合同 {$contract['contract_no']} → 已生效（可再次编辑/转单），来源报价单恢复可编辑");
+}
+
+/**
+ * 撤销出库（Q1=B 软删除：置 cancelled + 回滚库存，单据与明细保留留痕）
+ * 撤销后不再算「已出库」，合同因此自动解锁（Q4）。
+ *
+ * 调用方负责 admin 权限与原因必填校验，并开启/提交事务。
+ *
+ * @param int    $outstockId
+ * @param string $reason
+ */
+function undo_sales_outstock($outstockId, $reason) {
+    $pdo = getDB();
+    $outstockId = intval($outstockId);
+    $reason     = trim((string)$reason);
+    if ($reason === '') { throw new Exception('撤销出库必须填写原因'); }
+
+    $st = $pdo->prepare("SELECT * FROM sales_outstocks WHERE id=?");
+    $st->execute([$outstockId]);
+    $outstock = $st->fetch();
+    if (!$outstock) { throw new Exception('出库单不存在'); }
+    if ($outstock['status'] === 'cancelled') { throw new Exception('该出库单已撤销，无需重复操作'); }
+
+    // 回滚库存
+    $st = $pdo->prepare("SELECT * FROM sales_outstock_items WHERE outstock_id=?");
+    $st->execute([$outstockId]);
+    foreach ($st->fetchAll() as $item) {
+        update_inventory($item['product_id'], $outstock['warehouse_id'], $item['quantity'], 'in',
+            $outstock['bill_no'], 'sales_outstock_undo', get_user_id(), "撤销出库恢复库存：{$reason}");
+    }
+
+    $pdo->prepare("UPDATE sales_outstocks SET status='cancelled', cancel_reason=? WHERE id=?")
+        ->execute([$reason, $outstockId]);
+
+    // 订单回到已确认（可重新出库）；已取消的订单不动
+    $st = $pdo->prepare("SELECT id, status FROM sales_orders WHERE id=?");
+    $st->execute([intval($outstock['order_id'])]);
+    $order = $st->fetch();
+    if ($order && $order['status'] === 'shipped') {
+        $pdo->prepare("UPDATE sales_orders SET status='confirmed' WHERE id=?")->execute([intval($order['id'])]);
+    }
+
+    add_log(get_user_id(), 'undo', 'sales_outstock', "撤销出库: {$outstock['bill_no']} 原因: $reason");
+    return true;
 }

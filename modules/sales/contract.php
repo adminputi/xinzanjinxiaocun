@@ -54,6 +54,19 @@ if ($list) {
     foreach ($st->fetchAll() as $r) { $orderedMap[$r['contract_id']] = floatval($r['amt']); }
 }
 
+// 各合同是否已出库发货（决定能否编辑/删除：Q4 出了库就锁，撤销出库后自动解锁）
+$deliveredMap = [];
+if ($list) {
+    $ids = array_column($list, 'id');
+    $ph = implode(',', array_fill(0, count($ids), '?'));
+    $st = $pdo->prepare("SELECT DISTINCT so.contract_id
+        FROM sales_outstocks o
+        JOIN sales_orders so ON so.id = o.order_id
+        WHERE so.contract_id IN ($ph) AND so.status<>'cancelled' AND o.status='confirmed'");
+    $st->execute($ids);
+    foreach ($st->fetchAll(PDO::FETCH_COLUMN) as $cidRow) { $deliveredMap[intval($cidRow)] = true; }
+}
+
 $statusLabels = ['draft'=>'草稿','confirmed'=>'已生效','executing'=>'执行中','completed'=>'已完成','terminated'=>'已终止'];
 $statusBadges = ['draft'=>'warning','confirmed'=>'info','executing'=>'primary','completed'=>'success','terminated'=>'gray'];
 
@@ -70,6 +83,10 @@ function contract_action($pdo, $action, $cid, $isAdmin) {
         // 有没有订单由下面的检查把关，所以放宽这里不会误删已履约的合同
         if (!in_array($contract['status'], ['draft', 'confirmed', 'terminated'], true)) {
             return ['ok' => false, 'msg' => '仅草稿、已生效或已终止的合同可删除'];
+        }
+        // 已出库的不给删：出库单还在，删掉合同会让出库单找不到源头
+        if (contract_has_delivery($cid)) {
+            return ['ok' => false, 'msg' => '该合同名下订单已出库，无法删除（如需删除，请先撤销出库）'];
         }
         // 已生成订单的合同不允许删，避免留下无主订单（已取消的订单不算履约）
         $st = $pdo->prepare("SELECT COUNT(*) FROM sales_orders WHERE contract_id=? AND status<>'cancelled'");
@@ -145,6 +162,7 @@ if (!$isAjax) {
     <div style="display:flex;gap:8px;">
         <?php if ($isAdmin): ?>
         <a href="payment_type.php" class="btn btn-outline"><i class="fa-solid fa-money-bill-wave"></i> 付款方式</a>
+        <a href="sign_preset.php" class="btn btn-outline"><i class="fa-solid fa-stamp"></i> 乙方签章预设</a>
         <?php endif; ?>
         <a href="contract_form.php" class="btn btn-primary"><i class="fa-solid fa-plus"></i> 新增销售合同</a>
     </div>
@@ -176,10 +194,11 @@ if (!$isAjax) {
     <td>
         <div class="table-actions">
             <?php
-            // 编辑权限：草稿随时可改；已生效也放行——删掉订单后合同会回退到这个状态，
-            // 不让它改的话「转订单后想改合同」就彻底卡死。
-            // 有订单在履约时状态是 executing，本来就进不到这个分支
-            $editable = in_array($item['status'], ['draft', 'confirmed'], true);
+            // 编辑权限：只要「没出库」就能改 —— 包含执行中的合同。
+            // 这样「订单已出库 → 撤销出库 → 改合同 → 重新出库」整条路才走得通；
+            // 一旦出库，这里不再放编辑入口（contract_form.php 里还有第二道防线）。
+            $editable = in_array($item['status'], ['draft', 'confirmed', 'executing'], true)
+                        && empty($deliveredMap[$item['id']]);
             ?>
             <?php if ($editable): ?>
             <a href="contract_form.php?id=<?=$item['id']?>" class="btn btn-sm btn-outline">编辑</a>
