@@ -1968,6 +1968,70 @@ function customer_deal_tip($row) {
     return implode(' · ', $tips);
 }
 
+/* =====================================================================
+ * CRM 客户列表：置顶 / 标红（每人各自一套，互不影响）
+ * ---------------------------------------------------------------------
+ * 标记存在 user_customer_flags(user_id, customer_id) 里，而不是 customers 表上：
+ * 置顶属于「我个人想先看谁」，写进 customers 会让全公司共用一套顺序，
+ * 业务员之间互相挤位置。这里统一提供 JOIN 片段与排序片段，列表页和导出共用一套口径。
+ *
+ * 排序优先级：置顶 → 标红（未置顶的）→ 原有排序（id desc / 成交额 / 最近成交）
+ * 因为排序在 SQL 里完成（不是在 PHP 里排好再分页），置顶客户会稳定出现在第一页，
+ * 不会因为翻页跑到第 2、3 页去。
+ * ===================================================================== */
+
+/**
+ * 标记表的 JOIN 片段（按当前用户）
+ * @param int $userId 已 intval，可直接拼进 SQL
+ * @return string "LEFT JOIN user_customer_flags f ON ..."
+ */
+function customer_flag_join($userId) {
+    $userId = intval($userId);
+    return " LEFT JOIN user_customer_flags f ON f.customer_id = c.id AND f.user_id = {$userId}";
+}
+
+/**
+ * 排序片段：置顶优先、其次标红、最后按既有的 ORDER BY 字段
+ * @param string $tail 不含 ORDER BY 关键字的排序字段串，如 "c.id DESC"
+ */
+function customer_flag_order($tail = 'c.id DESC') {
+    return 'ORDER BY IFNULL(f.is_pinned,0) DESC, f.pinned_at DESC, '
+         . 'IFNULL(f.is_marked,0) DESC, ' . $tail;
+}
+
+/**
+ * 某人能否标记某个客户：管理员 或 该客户归属本人（与编辑权限同一口径）
+ */
+function can_flag_customer($customerId, $userId = null) {
+    if ($userId === null) { $userId = get_user_id(); }
+    if (get_user_role() === 'admin') return true;
+    $pdo = getDB();
+    $st = $pdo->prepare("SELECT owner_id FROM customers WHERE id=?");
+    $st->execute([intval($customerId)]);
+    $owner = $st->fetchColumn();
+    return $owner !== false && intval($owner) === intval($userId);
+}
+
+/**
+ * 当前用户的置顶/标红数量（列表页顶部提示用）
+ * @return array ['pinned'=>int, 'marked'=>int]
+ */
+function customer_flag_counts($userId = null) {
+    if ($userId === null) { $userId = get_user_id(); }
+    $pdo = getDB();
+    try {
+        $st = $pdo->prepare("SELECT COUNT(*) FROM user_customer_flags WHERE user_id=? AND is_pinned=1");
+        $st->execute([intval($userId)]);
+        $pinned = intval($st->fetchColumn());
+        $st = $pdo->prepare("SELECT COUNT(*) FROM user_customer_flags WHERE user_id=? AND is_marked=1");
+        $st->execute([intval($userId)]);
+        $marked = intval($st->fetchColumn());
+    } catch (Exception $e) {
+        return ['pinned' => 0, 'marked' => 0]; // 迁移未跑到（表还没建）时不要报错
+    }
+    return ['pinned' => $pinned, 'marked' => $marked];
+}
+
 /**
  * 同步采购订单状态（依据已确认入库数量自动流转）
  * 判定口径（按商品行数量比较）：

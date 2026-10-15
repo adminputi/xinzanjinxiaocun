@@ -7,6 +7,9 @@ require_once __DIR__ . '/../../includes/header.php';
 require_permission('crm_followup_view');
 $pdo = getDB();
 require_once __DIR__ . '/../../includes/migration.php';
+// 搜索客户的口径与「客户资料」同一份（名称/电话/公司/意向产品/备注/地址），
+// 跟进内容是本页特有的，在下面额外并上一个 OR
+require_once __DIR__ . '/search_hit.php';
 run_migrations();
 $isAdmin = (get_user_role() === 'admin');
 $userId = get_user_id();
@@ -49,8 +52,10 @@ if ($tab === 'today_pending') {
 }
 
 if ($search) {
-    $where .= " AND (c.name LIKE ? OR c.phone LIKE ? OR f.content LIKE ?)";
-    $params = array_merge($params, ["%$search%", "%$search%", "%$search%"]);
+    // 客户字段用统一口径，再并上跟进内容（本页主要就是搜跟进内容）
+    $sc = crm_search_cond($search, 'c');
+    $where .= " AND ({$sc['cond']} OR f.content LIKE ?)";
+    $params = array_merge($params, $sc['params'], ["%$search%"]);
 }
 
 // 所有 Tab 都按客户去重：一个客户一行，显示其最新一条跟进
@@ -140,7 +145,7 @@ $tabDoneCount = $countDone->fetchColumn();
 
 <form class="filter-bar" method="get">
     <input type="hidden" name="tab" value="<?=$tab?>">
-    <div class="search-box"><i class="fa-solid fa-search"></i><input type="text" name="search" class="form-control" placeholder="搜索客户/电话/内容..." value="<?=htmlspecialchars($search)?>"></div>
+    <div class="search-box"><i class="fa-solid fa-search"></i><input type="text" name="search" class="form-control" placeholder="搜索客户/跟进内容..." value="<?=htmlspecialchars($search)?>"></div>
     <button type="submit" class="btn btn-primary btn-sm">查询</button>
     <a href="?tab=<?=$tab?>" class="btn btn-outline btn-sm">清除</a>
 </form>

@@ -509,6 +509,24 @@ function run_migrations() {
         'receipt_allocations_refund_of' =>
             "ALTER TABLE receipt_allocations
              ADD COLUMN IF NOT EXISTS refund_of INT NOT NULL DEFAULT 0 COMMENT '退款红冲指向的原核销行ID，0=原始核销行'",
+
+        // ========== CRM 客户列表：置顶 / 标红（每人各自一套）==========
+        // 标记存在中间表里而不是 customers 上：置顶是「我想先看谁」，属于个人视图，
+        // 若写在 customers 上会变成全公司统一顺序，业务员之间互相挤位置。
+        // 一个人对一个客户只有一行（uk_user_customer），重复置顶只是 UPDATE，不会堆积。
+        'user_customer_flags_table' =>
+            "CREATE TABLE IF NOT EXISTS `user_customer_flags` (
+                `id` INT AUTO_INCREMENT PRIMARY KEY,
+                `user_id` INT NOT NULL COMMENT '操作人(users.id)，标记只对本人生效',
+                `customer_id` INT NOT NULL COMMENT '客户ID',
+                `is_pinned` TINYINT NOT NULL DEFAULT 0 COMMENT '是否置顶',
+                `pinned_at` DATETIME DEFAULT NULL COMMENT '置顶时间，多个置顶之间按它排先后',
+                `is_marked` TINYINT NOT NULL DEFAULT 0 COMMENT '是否标红',
+                `marked_at` DATETIME DEFAULT NULL COMMENT '标红时间',
+                `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY `uk_user_customer` (`user_id`, `customer_id`),
+                KEY `idx_customer` (`customer_id`)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='客户列表个人标记（置顶/标红）'",
     ];
     
     // 执行未完成的迁移

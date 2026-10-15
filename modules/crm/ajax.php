@@ -392,6 +392,104 @@ if ($action === 'batch_delete') {
     json_response(true, '已删除');
 }
 
+// ========== 某客户的全部跟进记录（客户列表里点击展开时才加载）==========
+// 列表页本来不需要这些数据，按需取避免把整张跟进表拉到前端；
+// 权限与跟进记录页保持一致：需要 crm_followup_view，且非管理员只能看自己客户的
+if ($action === 'get_customer_followups') {
+    if (!check_permission('crm_followup_view')) json_response(false, '无权限：没有「CRM跟进查看」权限');
+    $customerId = intval($_GET['customer_id'] ?? 0);
+    if (!$customerId) json_response(false, '缺少客户ID');
+
+    if (get_user_role() !== 'admin') {
+        $st = $pdo->prepare("SELECT owner_id FROM customers WHERE id=?");
+        $st->execute([$customerId]);
+        $owner = $st->fetchColumn();
+        if ($owner === false) json_response(false, '客户不存在');
+        if (intval($owner) !== intval(get_user_id())) json_response(false, '无权限：只能查看自己客户的跟进记录');
+    }
+
+    $st = $pdo->prepare("SELECT f.*, u.real_name as user_name
+        FROM customer_followups f
+        LEFT JOIN users u ON f.user_id=u.id
+        WHERE f.customer_id=?
+        ORDER BY f.created_at DESC, f.id DESC");
+    $st->execute([$customerId]);
+    json_response(true, '', $st->fetchAll());
+}
+
+// ========== 客户置顶 / 标红（每人各自一套）==========
+// field: pin=置顶 / mark=标红；value: 1=设置 / 0=取消
+// 权限：管理员 或 该客户归属本人（与「编辑客户」同一口径），所以业务员挪不动别人的客户顺序
+// ========== 客户列表「加载更多」：返回渲染好的 <tr>，前端直接追加进 tbody ==========
+// 取数和行渲染都复用 customer_list_partial.php（与列表页首屏同一份），
+// 所以列宽、按钮、跟进内容的显示逻辑不会两边对不上
+if ($action === 'customer_rows') {
+    if (!check_permission('crm_customer_view')) json_response(false, '无权限查看客户');
+    run_migrations();   // 确保 user_customer_flags（置顶/标红）已建
+
+    require_once __DIR__ . '/customer_list_partial.php';
+    $page    = max(1, intval($_GET['page'] ?? 1));
+    $perPage = intval($_GET['per_page'] ?? 0);
+    if ($perPage <= 0) { $perPage = intval($_COOKIE['crm_cust_per_page'] ?? 0); }
+    $perPage = max(CRM_CUSTOMER_PAGE_MIN, min(CRM_CUSTOMER_PAGE_MAX, $perPage ?: CRM_CUSTOMER_PAGE_DEFAULT));
+
+    $userId  = get_user_id();
+    $isAdmin = (get_user_role() === 'admin');
+    $q = crm_customer_query($pdo, $userId, $isAdmin, $_GET, $page, $perPage);
+
+    ob_start();
+    // 第 5 个参数传搜索词：加载出来的第 2、3…页也要和首屏一样命中高亮、补显示命中字段
+    crm_render_customer_rows($q['list'], $userId, $isAdmin, null, $q['filters']['search']);
+    $html = ob_get_clean();   // 必须先取出来：json_response 会清掉所有输出缓冲
+
+    json_response(true, 'ok', [
+        'html'  => $html,
+        'total' => $q['total'],
+        'page'  => $page,
+        'count' => count($q['list']),
+    ]);
+}
+
+if ($action === 'set_flag') {
+    csrf_check();
+    if (!check_permission('crm_customer_view')) json_response(false, '无权限查看客户');
+
+    $ids = trim((string)($_POST['ids'] ?? ''));
+    if ($ids === '') json_response(false, '请先选择客户');
+    $field = $_POST['field'] ?? '';
+    if (!in_array($field, ['pin', 'mark'], true)) json_response(false, '参数错误');
+    $value = intval($_POST['value'] ?? 0) ? 1 : 0;
+
+    run_migrations(); // 确保 user_customer_flags 已建
+    $userId = get_user_id();
+    $colPin  = $field === 'pin';
+    $allowed = 0;
+    $denied  = 0;
+
+    foreach (array_map('intval', explode(',', $ids)) as $cid) {
+        if ($cid <= 0) continue;
+        if (!can_flag_customer($cid, $userId)) { $denied++; continue; }
+
+        // 一个人对一个客户只保留一行，重复操作是 UPDATE 而不是 INSERT_ON_DUPLICATE 堆积
+        $pdo->prepare("INSERT IGNORE INTO user_customer_flags (user_id, customer_id, is_pinned, is_marked)
+                VALUES (?,?,0,0)")->execute([$userId, $cid]);
+
+        if ($colPin) {
+            $pdo->prepare("UPDATE user_customer_flags SET is_pinned=?, pinned_at=? WHERE user_id=? AND customer_id=?")
+                ->execute([$value, $value ? date('Y-m-d H:i:s') : null, $userId, $cid]);
+        } else {
+            $pdo->prepare("UPDATE user_customer_flags SET is_marked=?, marked_at=? WHERE user_id=? AND customer_id=?")
+                ->execute([$value, $value ? date('Y-m-d H:i:s') : null, $userId, $cid]);
+        }
+        $allowed++;
+    }
+
+    if (!$allowed) json_response(false, '没有可操作的客户（只能操作自己归属的客户）');
+    $label = ($colPin ? '置顶' : '标红') . ($value ? '' : '取消');
+    $tail = $denied ? "，{$denied} 个因不属于你被跳过" : '';
+    json_response(true, "已{$label} {$allowed} 个客户{$tail}");
+}
+
 // ========== 批量删除跟进 ==========
 if ($action === 'batch_delete_followup') {
     csrf_check();

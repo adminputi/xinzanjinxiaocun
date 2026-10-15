@@ -6,6 +6,8 @@
  */
 require_once __DIR__ . '/../../includes/header.php';
 require_permission('crm_pool_claim');
+// 搜索口径与「客户资料」同一份（名称/电话/公司/意向产品/备注/地址）
+require_once __DIR__ . '/search_hit.php';
 $pdo = getDB();
 $isAdmin = (get_user_role() === 'admin');
 $userId = get_user_id();
@@ -95,8 +97,10 @@ $offset = ($page - 1) * $perPage;
 $where = 'WHERE c.in_pool=1 AND c.status=1';
 $params = [];
 if ($search) {
-    $where .= " AND (c.name LIKE ? OR c.phone LIKE ? OR c.company LIKE ?)";
-    $params = array_merge($params, ["%$search%","%$search%","%$search%"]);
+    // 与「客户资料」同一份口径：公海里的客户同样是客户，搜不到会让人以为数据丢了
+    $sc = crm_search_cond($search, 'c');
+    $where .= " AND ({$sc['cond']})";
+    $params = array_merge($params, $sc['params']);
 }
 if ($sourceId > 0) { $where .= " AND c.source_id=?"; $params[] = $sourceId; }
 
@@ -140,7 +144,7 @@ $users = $pdo->query("SELECT id,real_name FROM users WHERE status=1 ORDER BY rea
 <?php endif; ?>
 
 <form class="filter-bar" method="get">
-    <div class="search-box"><i class="fa-solid fa-search"></i><input type="text" name="search" class="form-control" placeholder="搜索名称/电话/公司..." value="<?=htmlspecialchars($search)?>"></div>
+    <div class="search-box"><i class="fa-solid fa-search"></i><input type="text" name="search" class="form-control" placeholder="搜索名称/电话/地址等..." value="<?=htmlspecialchars($search)?>"></div>
     <select name="source_id" class="form-control" style="width:120px;">
         <option value="0">全部来源</option>
         <?php foreach($sources as $s): ?><option value="<?=$s['id']?>" <?=$sourceId==$s['id']?'selected':''?>><?=htmlspecialchars($s['name'])?></option><?php endforeach; ?>
