@@ -32,9 +32,30 @@ if ($id > 0) {
         die('该报价单已转订单，无法编辑。<a href="quote.php">返回列表</a>');
     }
     // 用 LEFT JOIN：即使明细里的商品已被删除，复制出来的行也不会凭空消失
-    $stmt = $pdo->prepare("SELECT i.*, p.name as product_name, p.sku, p.spec, p.unit_id, u.name as unit_name FROM sales_quote_items i LEFT JOIN products p ON i.product_id=p.id LEFT JOIN units u ON p.unit_id=u.id WHERE i.quote_id=? ORDER BY i.id");
+    $stmt = $pdo->prepare("SELECT i.*, p.name as product_name, p.sku, p.spec, p.unit_id, p.image as product_image, u.name as unit_name FROM sales_quote_items i LEFT JOIN products p ON i.product_id=p.id LEFT JOIN units u ON p.unit_id=u.id WHERE i.quote_id=? ORDER BY i.id");
     $stmt->execute([$id]);
     $items = $stmt->fetchAll();
+}
+
+/**
+ * 明细行里的商品缩略图（40px）：有图就显示并支持点击放大，无图显示灰色占位方块。
+ * 样式刻意与「添加商品」弹窗、报价详情页 quote_view.php 保持一致，三处看起来是同一套东西。
+ * $imagePath 是库里的相对路径（如 uploads/products/xx.jpg），本页在 /modules/sales/ 下，需补 ../../ 前缀。
+ */
+function quote_item_thumb($imagePath) {
+    if (!$imagePath) {
+        // 占位方块必须和图片同尺寸，否则有无图片的两种行会一高一矮
+        return '<span style="display:inline-block;width:40px;height:40px;background:var(--gray-100);border-radius:4px;text-align:center;line-height:40px;color:var(--gray-400);" title="无图片"><i class="fa-solid fa-box"></i></span>';
+    }
+    $src = '../../' . $imagePath;
+    // onclick 里塞的是一个 JS 字符串字面量，单/双引号要先转成 \u0027/\u0022：
+    // 路径里一旦出现引号会直接打断这段 JS，只靠 htmlspecialchars 保护不了 JS 上下文
+    // UNESCAPED_SLASHES / UNESCAPED_UNICODE 只为可读性：转义与否不影响安全性，
+    // 但不转义的话路径里的 / 会被写成 \/、中文会被写成 \uXXXX，看源码时很难认
+    $jsArg = json_encode($src, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    return '<img src="' . htmlspecialchars($src, ENT_QUOTES, 'UTF-8') . '" loading="lazy" decoding="async"'
+         . ' style="width:40px;height:40px;object-fit:cover;border-radius:4px;cursor:pointer;"'
+         . ' onclick="previewImage(' . htmlspecialchars($jsArg, ENT_QUOTES, 'UTF-8') . ')" title="点击放大" alt="">';
 }
 
 $isAdmin = ($_SESSION['user_role'] ?? '') === 'admin';
@@ -82,7 +103,22 @@ if ($currentUid && !isset($employees[$currentUid])) {
 $employeeValue = $quote ? intval($quote['employee_id'] ?? 0) : $currentUid;
 if ($employeeLocked) $employeeValue = $currentUid;
 // image 字段用于「添加商品」弹窗里显示商品缩略图（products.image 已存在于建表语句，无需迁移）
-$products = $pdo->query("SELECT id, sku, name, spec, image, sale_price, (SELECT name FROM units WHERE id=unit_id) as unit_name FROM products WHERE status=1 ORDER BY id")->fetchAll();
+$products = $pdo->query("SELECT id, sku, name, spec, image, sale_price, category_id, (SELECT name FROM units WHERE id=unit_id) as unit_name FROM products WHERE status=1 ORDER BY id")->fetchAll();
+
+// 「添加商品」弹窗里的分类下拉：只取启用的一级分类，顺带统计每个分类下有多少在售商品。
+// 用 LEFT JOIN 而不是 JOIN——否则 0 个商品的分类会整个消失，换季时正是要靠它发现
+// 新季节还没维护商品。
+$categories = $pdo->query("SELECT c.id, c.name, COUNT(p.id) AS product_count
+    FROM product_categories c
+    LEFT JOIN products p ON p.category_id = c.id AND p.status = 1
+    WHERE c.status = 1
+    GROUP BY c.id, c.name
+    ORDER BY c.sort_order, c.id")->fetchAll();
+
+// 没挂到任何分类下的商品：下拉里单独给一项，方便找出来补分类
+$uncategorizedCount = intval($pdo->query(
+    "SELECT COUNT(*) FROM products WHERE status=1 AND IFNULL(category_id,0)=0"
+)->fetchColumn());
 
 /**
  * 报价单保存
@@ -205,6 +241,8 @@ foreach ($products as $p) {
         'image_url' => $p['image'] ? '../../' . $p['image'] : '',
         'sale_price' => floatval($p['sale_price']),
         'unit_name' => $p['unit_name'],
+        // 分类筛选用：弹窗里的分类下拉按这个字段过滤（纯前端，不额外发请求）
+        'category_id' => intval($p['category_id'] ?? 0),
     ];
 }
 ?>
@@ -261,11 +299,12 @@ foreach ($products as $p) {
                 </div>
                 <div class="table-container">
                     <table>
-                        <thead><tr><th style="width:78px">序号</th><th>商品名称</th><th style="width:130px">数量</th><th style="width:110px">单价(¥)</th><th style="width:120px">金额(¥)</th><th style="width:140px">备注</th><th style="width:130px">操作</th></tr></thead>
+                        <thead><tr><th style="width:78px">序号</th><th style="width:52px;">图片</th><th>商品名称</th><th style="width:130px">数量</th><th style="width:110px">单价(¥)</th><th style="width:120px">金额(¥)</th><th style="width:140px">备注</th><th style="width:130px">操作</th></tr></thead>
                         <tbody id="itemsBody">
                             <?php if ($items): foreach ($items as $idx => $item): ?>
                             <tr class="editable-row">
                                 <td><input type="number" class="form-control sort-input" value="<?=$idx+1?>" min="1" onchange="sortByNumber(this)" style="text-align:center;" title="输入序号可直接调整排列"></td>
+                                <td><?= quote_item_thumb($item['product_image'] ?? '') ?></td>
                                 <td>
                                     <input type="hidden" name="product_id[]" value="<?=$item['product_id']?>">
                                     <?php
@@ -288,6 +327,9 @@ foreach ($products as $p) {
                             <?php endforeach; else: ?>
                             <tr id="emptyRow" class="editable-row" style="display:none;">
                                 <td><input type="number" class="form-control sort-input" value="1" min="1" onchange="sortByNumber(this)" style="text-align:center;" title="输入序号可直接调整排列"></td>
+                                <?php // #emptyRow 永远不显示（display:none），但列数必须和真实行一致，
+                                      // 否则未来万一显示出来，整行内容会整体左移一列 ?>
+                                <td></td>
                                 <td><input type="hidden" name="product_id[]" value=""><span class="product-display"></span></td>
                                 <td><div class="qty-stepper"><button type="button" class="stepper-btn" onclick="qtyDown(this)">−</button><input type="number" name="quantity[]" class="form-control qty-input" value="1" min="1" step="1" onchange="calcRow(this)" style="text-align:center;" required><button type="button" class="stepper-btn" onclick="qtyUp(this)">+</button></div></td>
                                 <td><input type="number" step="0.01" name="price[]" class="form-control number-input price-input" value="0" onchange="calcRow(this)" required></td>
@@ -303,7 +345,9 @@ foreach ($products as $p) {
                         </tbody>
                         <tfoot>
                             <tr>
-                                <td colspan="5" class="text-right"><strong>合计：</strong></td>
+                                <?php // colspan 是「序号+图片+商品名称+数量+单价」，加图片列后由 5 改 6，
+                                      // 不加的话「合计」会错位到备注列上面 ?>
+                                <td colspan="6" class="text-right"><strong>合计：</strong></td>
                                 <td><strong id="totalAmount">¥<?= $quote ? format_money($quote['total_amount']) : '0.00' ?></strong></td>
                                 <td></td>
                             </tr>
@@ -335,7 +379,21 @@ foreach ($products as $p) {
             <button class="modal-close" onclick="closeModal('productModal')"><i class="fa-solid fa-xmark"></i></button>
         </div>
         <div class="modal-body">
-            <div class="mb-2">
+            <div class="mb-2" style="display:flex;gap:8px;">
+                <?php // 一个分类都没建就别显示这个下拉了，否则就一个「全部分类」选项，纯占位 ?>
+                <?php if ($categories || $uncategorizedCount > 0): ?>
+                <?php // 分类下拉：默认「全部分类」，选了就只看该分类的商品。
+                      // 选项后面带该分类的在售商品数，换季时一眼看出新季节有没有维护商品 ?>
+                <select id="productCategory" class="form-control" style="width:190px;flex-shrink:0;" onchange="onProductCategoryChange()" title="按商品分类筛选，默认显示全部">
+                    <option value="">全部分类</option>
+                    <?php foreach ($categories as $cat): ?>
+                    <option value="<?=intval($cat['id'])?>"><?=htmlspecialchars($cat['name'])?>（<?=intval($cat['product_count'])?>）</option>
+                    <?php endforeach; ?>
+                    <?php if ($uncategorizedCount > 0): ?>
+                    <option value="0">未分类（<?=$uncategorizedCount?>）</option>
+                    <?php endif; ?>
+                </select>
+                <?php endif; ?>
                 <input type="text" id="productSearch" class="form-control" placeholder="搜索商品名称 / SKU / 规格..." oninput="filterProducts()">
             </div>
             <div style="max-height:420px;overflow-y:auto;">
@@ -347,6 +405,9 @@ foreach ($products as $p) {
             </div>
         </div>
         <div class="modal-footer">
+            <?php // 已选计数：切了分类之后，之前分类里勾的行就看不见了，
+                  // 这里把「已选几项 + 有多少不在当前筛选结果里」显示出来，避免以为自己没勾 ?>
+            <span id="pickedCount" style="margin-right:auto;font-size:13px;color:var(--gray-500);"></span>
             <button class="btn btn-outline" onclick="closeModal('productModal')">取消</button>
             <button class="btn btn-primary" onclick="addSelectedProducts()"><i class="fa-solid fa-check"></i> 确认添加</button>
         </div>
@@ -459,6 +520,36 @@ var allProducts = <?= json_encode($productsJson, JSON_UNESCAPED_UNICODE | JSON_H
 // 用户换一个搜索词再切回来，之前勾选的行和填好的数量就被清空了。
 var pickedQty = {};
 
+// ===== 商品分类筛选 =====
+// 记住上次选的分类：开单往往连着开同一季的单，每次重新选一遍很烦。
+// 空串 = 全部分类。
+var PICKER_CAT_COOKIE = 'sales_quote_product_cat';
+
+function pickerGetCookie(name) {
+    var m = document.cookie.match(new RegExp('(?:^|;\\s*)' + name + '=([^;]*)'));
+    return m ? decodeURIComponent(m[1]) : '';
+}
+function pickerSetCookie(name, val) {
+    // 半年有效；path=/ 保证本页（/modules/sales/）以及以后可能读它的接口都能拿到
+    document.cookie = name + '=' + encodeURIComponent(val)
+        + ';path=/;max-age=' + (180 * 86400) + ';samesite=Lax';
+}
+// 切换分类：写进 cookie 再重画列表（分类与关键词取交集）
+function onProductCategoryChange() {
+    var sel = document.getElementById('productCategory');
+    if (sel) pickerSetCookie(PICKER_CAT_COOKIE, sel.value);
+    filterProducts();
+}
+// 进页面时恢复上次选的分类：只接受下拉里还存在的选项，
+// 否则分类被删/停用后，旧 cookie 会让列表一打开就是空的
+(function initProductCategory() {
+    var sel = document.getElementById('productCategory');
+    if (!sel) return;
+    var v = pickerGetCookie(PICKER_CAT_COOKIE);
+    var exists = Array.prototype.some.call(sel.options, function (o) { return o.value === v; });
+    if (exists) sel.value = v;
+})();
+
 // 勾选状态变化时同步数量表；取消勾选即丢弃该行数量
 function syncPick(tr, checked) {
     var pid = tr.getAttribute('data-id');
@@ -488,11 +579,15 @@ function pickQty(input, pid) {
 
 function filterProducts() {
     var q = document.getElementById('productSearch').value.toLowerCase();
+    var catEl = document.getElementById('productCategory');
+    var cat = catEl ? catEl.value : '';
     var tbody = document.getElementById('productList');
     var noResult = document.getElementById('noProduct');
     document.getElementById('selectAll').checked = false;
     var rows = '';
     allProducts.forEach(function(p) {
+        // 分类与关键词取交集：先按分类筛掉，再在剩下的里面搜关键词
+        if (cat !== '' && String(p.category_id || 0) !== cat) return;
         var text = (p.sku + ' ' + p.name + ' ' + (p.spec||'') + ' ' + (p.unit_name||'')).toLowerCase();
         if (q && text.indexOf(q) === -1) return;
         var spec = p.spec || '-';
@@ -508,6 +603,8 @@ function filterProducts() {
     });
     tbody.innerHTML = rows || '';
     noResult.style.display = rows ? 'none' : '';
+    // 切分类/改关键词后要重算已选计数：有勾选的行可能已经不在结果里了
+    updatePickedCount();
 }
 
 function escapeHtml(str) { var div = document.createElement('div'); div.textContent = str; return div.innerHTML; }
@@ -532,33 +629,79 @@ function productThumbHtml(url, size) {
 function toggleProductRow(tr) { var cb = tr.querySelector('.product-check'); cb.checked = !cb.checked; tr.classList.toggle('selected', cb.checked); syncPick(tr, cb.checked); updateSelectAll(); }
 function syncRowCheck(cb) { var tr = cb.closest('tr'); tr.classList.toggle('selected', cb.checked); syncPick(tr, cb.checked); updateSelectAll(); }
 function toggleSelectAll(cb) { document.querySelectorAll('#productList .product-check').forEach(function(c){c.checked=cb.checked;}); document.querySelectorAll('#productList tr').forEach(function(r){r.classList.toggle('selected',cb.checked);syncPick(r,cb.checked);}); updateSelectAll(); }
-function updateSelectAll() { var checks = document.querySelectorAll('#productList .product-check'); document.getElementById('selectAll').checked = checks.length > 0 && Array.from(checks).every(function(c){return c.checked;}); }
+function updateSelectAll() { var checks = document.querySelectorAll('#productList .product-check'); document.getElementById('selectAll').checked = checks.length > 0 && Array.from(checks).every(function(c){return c.checked;}); updatePickedCount(); }
 // 每次打开弹窗都清空已选数量：本次选择是新一轮操作，不应残留上一次的数据
-function openProductModal() { pickedQty = {}; openModal('productModal'); filterProducts(); document.getElementById('productSearch').value = ''; setTimeout(function(){document.getElementById('productSearch').focus();},150); }
+// 注意顺序：先清空搜索框再渲染列表。原来反着来（先 filterProducts 再清空），
+// 结果是列表按上一次的关键词过滤了，输入框却显示为空，看着像"商品少了一半"。
+// 分类下拉则保持上次的选择不动——那是特意记住的，不清。
+function openProductModal() { pickedQty = {}; openModal('productModal'); document.getElementById('productSearch').value = ''; filterProducts(); setTimeout(function(){document.getElementById('productSearch').focus();},150); }
+
+// 按 id 在 allProducts 里找商品。确认添加以 pickedQty 为准（见下方 addSelectedProducts），
+// 名称/SKU/单价都从这里取，不再依赖列表里那一行的 data-* 属性——
+// 切了分类之后那一行根本不存在于 DOM 里。
+function findProductById(pid) {
+    for (var i = 0; i < allProducts.length; i++) {
+        if (String(allProducts[i].id) === String(pid)) return allProducts[i];
+    }
+    return null;
+}
+
+// 已选计数：切分类/改关键词后，之前勾的行会看不见，容易误以为没勾上。
+// 顺带把「有多少项不在当前筛选结果里」列出来，因为确认时它们也会一起加进来。
+function updatePickedCount() {
+    var el = document.getElementById('pickedCount');
+    if (!el) return;
+    var ids = Object.keys(pickedQty);
+    if (ids.length === 0) { el.textContent = ''; return; }
+    var catEl = document.getElementById('productCategory');
+    var cat = catEl ? catEl.value : '';
+    var qEl = document.getElementById('productSearch');
+    var q = qEl ? qEl.value.toLowerCase() : '';
+    var hidden = 0;
+    ids.forEach(function (pid) {
+        var p = findProductById(pid);
+        if (!p) { hidden++; return; }
+        // 与 filterProducts() 同一套判断：分类 + 关键词
+        if (cat !== '' && String(p.category_id || 0) !== cat) { hidden++; return; }
+        if (q) {
+            var text = (p.sku + ' ' + p.name + ' ' + (p.spec || '') + ' ' + (p.unit_name || '')).toLowerCase();
+            if (text.indexOf(q) === -1) hidden++;
+        }
+    });
+    el.textContent = hidden > 0
+        ? '已选 ' + ids.length + ' 项（其中 ' + hidden + ' 项不在当前筛选结果里，也会一起添加）'
+        : '已选 ' + ids.length + ' 项';
+}
 
 function addSelectedProducts() {
-    var checked = document.querySelectorAll('#productList .product-check:checked');
-    if (checked.length === 0) { alert('请至少选择一个商品'); return; }
+    // 以 pickedQty（{商品ID:数量}）为准，而不是只取当前列表里看得见的勾选行。
+    // 在「冬季」勾了 3 个、切到「夏季」再勾 2 个，点确认时 5 个要一起加进来；
+    // 只看 DOM 的话，切过分类就会静默漏掉之前勾的商品。
+    var ids = Object.keys(pickedQty);
+    if (ids.length === 0) { alert('请至少选择一个商品'); return; }
     var tbody = document.getElementById('itemsBody');
     var emptyHint = document.getElementById('emptyHint');
     if (emptyHint) emptyHint.style.display = 'none';
     var existingIds = {};
     tbody.querySelectorAll('input[name="product_id[]"]').forEach(function(inp){ if(inp.value)existingIds[inp.value]=true; });
-    checked.forEach(function(cb){
-        var tr = cb.closest('tr'), pid = tr.getAttribute('data-id');
+    ids.forEach(function(pid){
         if (existingIds[pid]) return;
+        var p = findProductById(pid);
+        if (!p) return;   // 理论上不会发生：allProducts 与弹窗列表同源
         existingIds[pid] = true;
-        var name = tr.getAttribute('data-name'), sku = tr.getAttribute('data-sku'), spec = tr.getAttribute('data-spec'), price = tr.getAttribute('data-price');
-        // 取弹窗里填的数量（默认 1）；非法值兜底为 1
-        var qtyInp = tr.querySelector('.sel-qty');
-        var qty = qtyInp ? (parseFloat(qtyInp.value) || 1) : 1;
-        if (qty <= 0) qty = 1;
+        var name = escapeHtml(p.name), sku = escapeHtml(p.sku), spec = escapeHtml(p.spec || '-');
+        var price = parseFloat(p.sale_price) || 0;
+        // 取勾选时记下的数量（默认 1）；非法值兜底为 1
+        var qty = parseFloat(pickedQty[pid]);
+        if (!isFinite(qty) || qty <= 0) qty = 1;
         // 小计不能再用原来的 value="'+price+'"（那是写死的「单价×1」）。
         // calcTotal() 是累加 .amount-display 的值，不填对这里，行小计和总合计都会显示成单价×1。
         // 后端保存时会用 数量×单价 重新计算，不受影响，但用户保存前看到的金额必须是正确的。
         var amount = (parseFloat(price) * qty).toFixed(2);
         var rowHtml = '<tr class="editable-row">'
             + '<td><input type="number" class="form-control sort-input" value="1" min="1" onchange="sortByNumber(this)" style="text-align:center;" title="输入序号可直接调整排列"></td>'
+            // 商品缩略图：复用「添加商品」弹窗的 productThumbHtml()，尺寸/占位/点击放大三处完全一致
+            + '<td>'+productThumbHtml(p.image_url, 40)+'</td>'
             + '<td><input type="hidden" name="product_id[]" value="'+pid+'"><span class="product-display">'+name+' <small style="color:var(--gray-500)">['+sku+'] '+spec+'</small></span></td>'
             + '<td><div class="qty-stepper"><button type="button" class="stepper-btn" onclick="qtyDown(this)">−</button><input type="number" name="quantity[]" class="form-control qty-input" value="'+qty+'" min="1" step="1" onchange="calcRow(this)" style="text-align:center;" required><button type="button" class="stepper-btn" onclick="qtyUp(this)">+</button></div></td>'
             + '<td><input type="number" step="0.01" name="price[]" class="form-control number-input price-input" value="'+price+'" onchange="calcRow(this)" required></td>'
