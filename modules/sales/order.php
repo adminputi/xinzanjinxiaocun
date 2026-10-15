@@ -1,16 +1,30 @@
 <?php
 require_once __DIR__ . '/../../includes/header.php';
+// 业务员 / 状态筛选：报价、合同、订单、出库四个列表共用同一套
+require_once __DIR__ . '/bill_filter.php';
 require_permission('sales_order');
 $pdo = getDB();
 $page = max(1, intval($_GET['page'] ?? 1));
 $search = $_GET['search'] ?? '';
 $isAdmin = (get_user_role() === 'admin');
 
+$employee = trim($_GET['employee'] ?? '');   // 按业务员筛：下拉直接选某个人
+$status   = $_GET['status'] ?? '';           // 按状态筛
+
 $where = ''; $params = [];
 $conditions = [];
 if ($search) {
-    $conditions[] = "(o.bill_no LIKE ? OR c.name LIKE ?)";
-    $params[] = "%$search%"; $params[] = "%$search%";
+    // 业务员名字在 users 表（单据只存 employee_id），JOIN 过来才能按名字搜
+    $conditions[] = "(o.bill_no LIKE ? OR c.name LIKE ? OR IFNULL(u.real_name,'') LIKE ?)";
+    $params[] = "%$search%"; $params[] = "%$search%"; $params[] = "%$search%";
+}
+if ($employee !== '') {
+    $ec = sales_emp_cond($pdo, $employee, 'o');
+    if ($ec['cond'] !== '') { $conditions[] = $ec['cond']; $params = array_merge($params, $ec['params']); }
+}
+if ($status !== '') {
+    $conditions[] = "o.status = ?";
+    $params[] = $status;
 }
 // 非admin用户只看自己创建的订单
 if (!$isAdmin) {
@@ -22,14 +36,17 @@ if ($conditions) {
 }
 
 $perPage = ITEMS_PER_PAGE; $offset = ($page-1)*$perPage;
-$stmt = $pdo->prepare("SELECT COUNT(*) FROM sales_orders o LEFT JOIN customers c ON o.customer_id=c.id $where"); $stmt->execute($params); $total = $stmt->fetchColumn();
+// COUNT 也必须 JOIN users：搜索条件里用到 u.real_name，漏了会报 Unknown column
+$stmt = $pdo->prepare("SELECT COUNT(*) FROM sales_orders o LEFT JOIN customers c ON o.customer_id=c.id LEFT JOIN users u ON o.employee_id=u.id $where"); $stmt->execute($params); $total = $stmt->fetchColumn();
 $pages = ceil($total/$perPage);
 
 $stmt = $pdo->prepare("SELECT o.*, c.name as customer_name, w.name as warehouse_name, u.real_name as employee_name, (SELECT COUNT(*) FROM sales_outstocks WHERE order_id=o.id AND status='confirmed') as outstock_count FROM sales_orders o LEFT JOIN customers c ON o.customer_id=c.id LEFT JOIN warehouses w ON o.warehouse_id=w.id LEFT JOIN users u ON o.employee_id=u.id $where ORDER BY o.id DESC LIMIT $offset,$perPage");
 $stmt->execute($params); $list = $stmt->fetchAll();
 
-$statusLabels = ['draft'=>'可编辑','confirmed'=>'已锁定','shipped'=>'已出库'];
-$statusBadges = ['draft'=>'warning','confirmed'=>'info','shipped'=>'success'];
+// 状态枚举一共有 6 个值（draft/confirmed/shipped/partial/completed/cancelled），
+// 这里补全映射：原来只映射了 3 个，遇到 partial/completed/cancelled 会显示成英文原值
+$statusLabels = ['draft'=>'可编辑','confirmed'=>'已锁定','shipped'=>'已出库','partial'=>'部分出库','completed'=>'已完成','cancelled'=>'已取消'];
+$statusBadges = ['draft'=>'warning','confirmed'=>'info','shipped'=>'success','partial'=>'primary','completed'=>'success','cancelled'=>'gray'];
 
 // 确认订单（draft → confirmed）仅admin
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'confirm') {
@@ -163,6 +180,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'delete'
 }
 ?>
 
+<?php // 业务员下拉：只列在订单里实际出现过的人，避免离职的、从没开过单的占一屏 ?>
+<?php $empOptions = $isAdmin ? sales_emp_options($pdo, 'sales_orders') : []; ?>
 <?php flash_show(); ?>
 <div class="page-header">
     <h1 class="page-title"><i class="fa-solid fa-file-invoice-dollar"></i> 销售订单</h1>
@@ -170,9 +189,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'delete'
 </div>
 
 <form class="filter-bar" method="get">
-    <div class="search-box"><i class="fa-solid fa-search"></i><input type="text" name="search" class="form-control" placeholder="搜索单号/客户..." value="<?= htmlspecialchars($search) ?>"></div>
+    <div class="search-box"><i class="fa-solid fa-search"></i><input type="text" name="search" class="form-control" placeholder="搜索单号/客户/业务员..." value="<?= htmlspecialchars($search) ?>"></div>
     <button type="submit" class="btn btn-primary btn-sm">查询</button>
-    <?php if($search): ?><a href="order.php" class="btn btn-outline btn-sm">清除</a><?php endif; ?>
+    <?php // 业务员筛选只给管理员：其他人本来就只看得到自己开的单，下拉里也只会有一个人 ?>
+    <?php if ($isAdmin): ?><?= sales_emp_select($empOptions, $employee) ?><?php endif; ?>
+    <?= sales_status_select($statusLabels, $status) ?>
+    <?php if($search || $employee || $status): ?><a href="order.php" class="btn btn-outline btn-sm">清除</a><?php endif; ?>
 </form>
 
 <div class="card"><div class="card-body" style="padding:0;"><div class="table-container">
@@ -218,7 +240,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'delete'
 </table></div></div></div>
 
 <?php if($pages>1): ?><div class="pagination"><span class="info">共<?=$total?>条/<?=$pages?>页</span>
-<?php for($i=max(1,$page-2);$i<=min($pages,$page+2);$i++): ?><a href="?page=<?=$i?>&search=<?=urlencode($search)?>" class="<?=$i==$page?'active':''?>"><?=$i?></a><?php endfor; ?></div><?php endif; ?>
+<?php // 翻页要带上当前所有筛选条件，否则一点第 2 页业务员/状态筛选就丢了 ?>
+<?php for($i=max(1,$page-2);$i<=min($pages,$page+2);$i++): ?><a href="?<?=sales_page_query($i, ['search','employee','status'])?>" class="<?=$i==$page?'active':''?>"><?=$i?></a><?php endfor; ?></div><?php endif; ?>
 
 <?php if ($isAdmin): ?>
 <!-- 撤销出库（软删除，保留出库单留痕） -->

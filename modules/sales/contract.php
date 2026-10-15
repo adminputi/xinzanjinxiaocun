@@ -8,6 +8,8 @@ $isAjax = (($_POST['_ajax'] ?? '') === '1' || strtolower($_SERVER['HTTP_X_REQUES
 require_once __DIR__ . '/../../includes/functions.php';
 require_once __DIR__ . '/../../includes/auth.php';
 require_once __DIR__ . '/../../includes/migration.php';
+// 业务员 / 状态筛选：报价、合同、订单、出库四个列表共用同一套
+require_once __DIR__ . '/bill_filter.php';
 require_permission('sales_contract');
 $pdo = getDB();
 run_migrations();
@@ -16,11 +18,23 @@ $page = max(1, intval($_GET['page'] ?? 1));
 $search = $_GET['search'] ?? '';
 $isAdmin = (get_user_role() === 'admin');
 
+$employee = trim($_GET['employee'] ?? '');   // 按业务员筛：下拉直接选某个人
+$status   = $_GET['status'] ?? '';           // 按状态筛
+
 $where = ''; $params = [];
 $conditions = [];
 if ($search) {
-    $conditions[] = "(ct.contract_no LIKE ? OR c.name LIKE ? OR q.bill_no LIKE ?)";
-    $params[] = "%$search%"; $params[] = "%$search%"; $params[] = "%$search%";
+    // 业务员名字在 users 表（单据只存 employee_id），JOIN 过来才能按名字搜
+    $conditions[] = "(ct.contract_no LIKE ? OR c.name LIKE ? OR q.bill_no LIKE ? OR IFNULL(u.real_name,'') LIKE ?)";
+    $params[] = "%$search%"; $params[] = "%$search%"; $params[] = "%$search%"; $params[] = "%$search%";
+}
+if ($employee !== '') {
+    $ec = sales_emp_cond($pdo, $employee, 'ct');
+    if ($ec['cond'] !== '') { $conditions[] = $ec['cond']; $params = array_merge($params, $ec['params']); }
+}
+if ($status !== '') {
+    $conditions[] = "ct.status = ?";
+    $params[] = $status;
 }
 // 非admin用户只看自己创建的合同
 if (!$isAdmin) {
@@ -32,7 +46,8 @@ if ($conditions) {
 }
 
 $perPage = ITEMS_PER_PAGE; $offset = ($page-1)*$perPage;
-$stmt = $pdo->prepare("SELECT COUNT(*) FROM sales_contracts ct LEFT JOIN customers c ON ct.customer_id=c.id LEFT JOIN sales_quotes q ON ct.quote_id=q.id $where");
+// COUNT 也必须 JOIN users：搜索条件里用到 u.real_name，漏了会报 Unknown column
+$stmt = $pdo->prepare("SELECT COUNT(*) FROM sales_contracts ct LEFT JOIN customers c ON ct.customer_id=c.id LEFT JOIN sales_quotes q ON ct.quote_id=q.id LEFT JOIN users u ON ct.employee_id=u.id $where");
 $stmt->execute($params); $total = $stmt->fetchColumn();
 $pages = ceil($total/$perPage);
 
@@ -157,6 +172,8 @@ if (!$isAjax) {
 }
 ?>
 
+<?php // 业务员下拉：只列在合同里实际出现过的人，避免离职的、从没签过合同的占一屏 ?>
+<?php $empOptions = $isAdmin ? sales_emp_options($pdo, 'sales_contracts') : []; ?>
 <div class="page-header">
     <h1 class="page-title"><i class="fa-solid fa-file-signature"></i> 销售合同</h1>
     <div style="display:flex;gap:8px;">
@@ -169,9 +186,12 @@ if (!$isAjax) {
 </div>
 
 <form class="filter-bar" method="get">
-    <div class="search-box"><i class="fa-solid fa-search"></i><input type="text" name="search" class="form-control" placeholder="搜索合同号/客户/报价单号..." value="<?= htmlspecialchars($search) ?>"></div>
+    <div class="search-box"><i class="fa-solid fa-search"></i><input type="text" name="search" class="form-control" placeholder="搜索合同号/客户/报价单/业务员..." value="<?= htmlspecialchars($search) ?>"></div>
     <button type="submit" class="btn btn-primary btn-sm">查询</button>
-    <?php if($search): ?><a href="contract.php" class="btn btn-outline btn-sm">清除</a><?php endif; ?>
+    <?php // 业务员筛选只给管理员：其他人本来就只看得到自己签的合同，下拉里也只会有一个人 ?>
+    <?php if ($isAdmin): ?><?= sales_emp_select($empOptions, $employee) ?><?php endif; ?>
+    <?= sales_status_select($statusLabels, $status) ?>
+    <?php if($search || $employee || $status): ?><a href="contract.php" class="btn btn-outline btn-sm">清除</a><?php endif; ?>
 </form>
 
 <div class="card"><div class="card-body" style="padding:0;"><div class="table-container">
@@ -226,7 +246,8 @@ if (!$isAjax) {
 </table></div></div></div>
 
 <?php if($pages>1): ?><div class="pagination" id="contractPagination"><span class="info">共<?=$total?>条/<?=$pages?>页</span>
-<?php for($i=max(1,$page-2);$i<=min($pages,$page+2);$i++): ?><a href="?page=<?=$i?>&search=<?=urlencode($search)?>" class="<?=$i==$page?'active':''?>"><?=$i?></a><?php endfor; ?></div><?php endif; ?>
+<?php // 翻页要带上当前所有筛选条件，否则一点第 2 页搜索词/业务员就丢了 ?>
+<?php for($i=max(1,$page-2);$i<=min($pages,$page+2);$i++): ?><a href="?<?=sales_page_query($i, ['search','employee','status'])?>" class="<?=$i==$page?'active':''?>"><?=$i?></a><?php endfor; ?></div><?php endif; ?>
 
 <script>
 // 删除/确认生效/终止：AJAX 提交，成功后就地刷新列表，不再整页跳转（避免空白页）

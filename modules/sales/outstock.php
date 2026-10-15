@@ -1,6 +1,8 @@
 <?php
 require_once __DIR__ . '/../../includes/header.php';
 require_once __DIR__ . '/../../includes/migration.php';
+// 业务员 / 状态筛选：报价、合同、订单、出库四个列表共用同一套
+require_once __DIR__ . '/bill_filter.php';
 require_permission('sales_outstock');
 $pdo = getDB();
 $isAdmin = (get_user_role() === 'admin');
@@ -10,10 +12,26 @@ run_migrations();
 
 $page = max(1, intval($_GET['page'] ?? 1));
 $search = $_GET['search'] ?? '';
+$employee = trim($_GET['employee'] ?? '');   // 按业务员筛：下拉直接选某个人
+$status   = $_GET['status'] ?? '';           // 按状态筛
 
 $where = ''; $params = [];
 $conditions = [];
-if ($search) { $conditions[] = "(so.bill_no LIKE ? OR c.name LIKE ?)"; $params[] = "%$search%"; $params[] = "%$search%"; }
+// 出库单的业务员有两处：employee_id（关联 users.real_name）和 salesperson_name
+// （单据上直接存的名字），历史单据存在 employee_id=0 但名字有值，两边都要认
+if ($search) {
+    $conditions[] = "(so.bill_no LIKE ? OR c.name LIKE ?
+                      OR IFNULL(u.real_name,'') LIKE ? OR IFNULL(so.salesperson_name,'') LIKE ?)";
+    $params[] = "%$search%"; $params[] = "%$search%"; $params[] = "%$search%"; $params[] = "%$search%";
+}
+if ($employee !== '') {
+    $ec = sales_emp_cond($pdo, $employee, 'so', 'employee_id', 'salesperson_name');
+    if ($ec['cond'] !== '') { $conditions[] = $ec['cond']; $params = array_merge($params, $ec['params']); }
+}
+if ($status !== '') {
+    $conditions[] = "so.status = ?";
+    $params[] = $status;
+}
 // 非admin用户只看自己创建的出库单
 if (!$isAdmin) {
     $conditions[] = "so.user_id = ?";
@@ -24,11 +42,16 @@ if ($conditions) {
 }
 
 $perPage = ITEMS_PER_PAGE; $offset = ($page-1)*$perPage;
-$stmt = $pdo->prepare("SELECT COUNT(*) FROM sales_outstocks so LEFT JOIN customers c ON so.customer_id=c.id $where"); $stmt->execute($params); $total = $stmt->fetchColumn();
+// COUNT 和列表都必须 JOIN users：搜索/筛选用到 u.real_name，漏了会报 Unknown column
+$stmt = $pdo->prepare("SELECT COUNT(*) FROM sales_outstocks so LEFT JOIN customers c ON so.customer_id=c.id LEFT JOIN users u ON so.employee_id=u.id $where"); $stmt->execute($params); $total = $stmt->fetchColumn();
 $pages = ceil($total/$perPage);
 
-$stmt = $pdo->prepare("SELECT so.*, c.name as customer_name, w.name as warehouse_name FROM sales_outstocks so LEFT JOIN customers c ON so.customer_id=c.id LEFT JOIN warehouses w ON so.warehouse_id=w.id $where ORDER BY so.id DESC LIMIT $offset,$perPage");
+$stmt = $pdo->prepare("SELECT so.*, c.name as customer_name, w.name as warehouse_name, u.real_name as employee_name FROM sales_outstocks so LEFT JOIN customers c ON so.customer_id=c.id LEFT JOIN warehouses w ON so.warehouse_id=w.id LEFT JOIN users u ON so.employee_id=u.id $where ORDER BY so.id DESC LIMIT $offset,$perPage");
 $stmt->execute($params); $list = $stmt->fetchAll();
+
+// 状态筛选只列实际会出现的两种：出库即 confirmed，撤销后为 cancelled
+// （draft 在出库单里不出现，所以不列，避免选了个永远为空的选项）
+$statusLabels = ['confirmed'=>'已出库','cancelled'=>'已撤销'];
 
 $customers = get_options('customers','id','name','status=1');
 // 获取所有客户详细信息用于下拉
@@ -178,9 +201,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'undo') 
 <?php flash_show(); ?>
 <?php if (isset($error)): ?><div class="alert alert-danger"><?= $error ?></div><?php endif; ?>
 
+<?php // 业务员下拉：出库单特殊，employee_id 关联的名字和 salesperson_name 文本名要合并去重 ?>
+<?php $empOptions = $isAdmin ? sales_emp_options($pdo, 'sales_outstocks', 'employee_id', 'salesperson_name') : []; ?>
 <form class="filter-bar" method="get">
-    <div class="search-box"><i class="fa-solid fa-search"></i><input type="text" name="search" class="form-control" placeholder="搜索单号/客户..." value="<?= htmlspecialchars($search) ?>"></div>
+    <div class="search-box"><i class="fa-solid fa-search"></i><input type="text" name="search" class="form-control" placeholder="搜索单号/客户/业务员..." value="<?= htmlspecialchars($search) ?>"></div>
     <button type="submit" class="btn btn-primary btn-sm">查询</button>
+    <?php // 业务员筛选只给管理员：其他人本来就只看得到自己出的单，下拉里也只会有一个人 ?>
+    <?php if ($isAdmin): ?><?= sales_emp_select($empOptions, $employee) ?><?php endif; ?>
+    <?= sales_status_select($statusLabels, $status) ?>
+    <?php if($search || $employee || $status): ?><a href="outstock.php" class="btn btn-outline btn-sm">清除</a><?php endif; ?>
 </form>
 
 <div class="card"><div class="card-body" style="padding:0;"><div class="table-container">
@@ -210,7 +239,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'undo') 
 </tbody>
 </table></div></div></div>
 
-<?php if($pages>1): ?><div class="pagination"><span class="info">共<?=$total?>条/<?=$pages?>页</span><?php for($i=1;$i<=$pages;$i++): ?><a href="?page=<?=$i?>" class="<?=$i==$page?'active':''?>"><?=$i?></a><?php endfor; ?></div><?php endif; ?>
+<?php if($pages>1): ?><div class="pagination"><span class="info">共<?=$total?>条/<?=$pages?>页</span><?php // 翻页要带上当前所有筛选条件：原来写死成 ?page=N，一点第 2 页搜索词就丢了 ?>
+<?php for($i=1;$i<=$pages;$i++): ?><a href="?<?=sales_page_query($i, ['search','employee','status'])?>" class="<?=$i==$page?'active':''?>"><?=$i?></a><?php endfor; ?></div><?php endif; ?>
 
 <!-- 新增出库单弹窗 -->
 <div class="modal-overlay" id="outModal"><div class="modal modal-lg"><div class="modal-header"><h3 class="modal-title">新增销售出库</h3><button class="modal-close" onclick="closeModal('outModal')">&times;</button></div>

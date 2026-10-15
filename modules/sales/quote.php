@@ -8,6 +8,8 @@ $isAjax = (($_POST['_ajax'] ?? '') === '1' || strtolower($_SERVER['HTTP_X_REQUES
 require_once __DIR__ . '/../../includes/functions.php';
 require_once __DIR__ . '/../../includes/auth.php';
 require_once __DIR__ . '/../../includes/migration.php';
+// 业务员 / 状态筛选：报价、合同、订单、出库四个列表共用同一套
+require_once __DIR__ . '/bill_filter.php';
 require_permission('sales_quote');
 $pdo = getDB();
 run_migrations();
@@ -16,11 +18,23 @@ $page = max(1, intval($_GET['page'] ?? 1));
 $search = $_GET['search'] ?? '';
 $isAdmin = (get_user_role() === 'admin');
 
+$employee = trim($_GET['employee'] ?? '');   // 按业务员筛：下拉直接选某个人
+$status   = $_GET['status'] ?? '';           // 按状态筛
+
 $where = ''; $params = [];
 $conditions = [];
 if ($search) {
-    $conditions[] = "(q.bill_no LIKE ? OR c.name LIKE ?)";
-    $params[] = "%$search%"; $params[] = "%$search%";
+    // 业务员名字在 users 表（单据只存 employee_id），JOIN 过来才能按名字搜
+    $conditions[] = "(q.bill_no LIKE ? OR c.name LIKE ? OR IFNULL(u.real_name,'') LIKE ?)";
+    $params[] = "%$search%"; $params[] = "%$search%"; $params[] = "%$search%";
+}
+if ($employee !== '') {
+    $ec = sales_emp_cond($pdo, $employee, 'q');
+    if ($ec['cond'] !== '') { $conditions[] = $ec['cond']; $params = array_merge($params, $ec['params']); }
+}
+if ($status !== '') {
+    $conditions[] = "q.status = ?";
+    $params[] = $status;
 }
 // 非admin用户只看自己创建的报价单
 if (!$isAdmin) {
@@ -32,7 +46,8 @@ if ($conditions) {
 }
 
 $perPage = ITEMS_PER_PAGE; $offset = ($page-1)*$perPage;
-$stmt = $pdo->prepare("SELECT COUNT(*) FROM sales_quotes q LEFT JOIN customers c ON q.customer_id=c.id $where"); $stmt->execute($params); $total = $stmt->fetchColumn();
+// COUNT 也必须 JOIN users：搜索条件里用到 u.real_name，漏了会报 Unknown column
+$stmt = $pdo->prepare("SELECT COUNT(*) FROM sales_quotes q LEFT JOIN customers c ON q.customer_id=c.id LEFT JOIN users u ON q.employee_id=u.id $where"); $stmt->execute($params); $total = $stmt->fetchColumn();
 $pages = ceil($total/$perPage);
 
 $stmt = $pdo->prepare("SELECT q.*, c.name as customer_name, u.real_name as employee_name, so.status as order_status, so.bill_no as order_bill_no, ct.id as contract_id, ct.contract_no FROM sales_quotes q LEFT JOIN customers c ON q.customer_id=c.id LEFT JOIN users u ON q.employee_id=u.id LEFT JOIN sales_orders so ON q.order_id=so.id LEFT JOIN sales_contracts ct ON q.contract_id=ct.id $where ORDER BY q.id DESC LIMIT $offset,$perPage");
@@ -212,6 +227,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 if (!$isAjax) {
     require_once __DIR__ . '/../../includes/header.php';
 }
+// 业务员下拉：只列在报价单里实际出现过的人，避免离职的、从没开过报价的占一屏
+$empOptions = $isAdmin ? sales_emp_options($pdo, 'sales_quotes') : [];
 ?>
 
 <div class="page-header">
@@ -220,9 +237,12 @@ if (!$isAjax) {
 </div>
 
 <form class="filter-bar" method="get">
-    <div class="search-box"><i class="fa-solid fa-search"></i><input type="text" name="search" class="form-control" placeholder="搜索单号/客户..." value="<?= htmlspecialchars($search) ?>"></div>
+    <div class="search-box"><i class="fa-solid fa-search"></i><input type="text" name="search" class="form-control" placeholder="搜索单号/客户/业务员..." value="<?= htmlspecialchars($search) ?>"></div>
     <button type="submit" class="btn btn-primary btn-sm">查询</button>
-    <?php if($search): ?><a href="quote.php" class="btn btn-outline btn-sm">清除</a><?php endif; ?>
+    <?php // 业务员筛选只给管理员：其他人本来就只看得到自己开的单，下拉里也只会有一个人 ?>
+    <?php if ($isAdmin): ?><?= sales_emp_select($empOptions, $employee) ?><?php endif; ?>
+    <?= sales_status_select($statusLabels, $status) ?>
+    <?php if($search || $employee || $status): ?><a href="quote.php" class="btn btn-outline btn-sm">清除</a><?php endif; ?>
 </form>
 
 <div class="card"><div class="card-body" style="padding:0;"><div class="table-container">
@@ -282,7 +302,8 @@ if (!$isAjax) {
 </table></div></div></div>
 
 <?php if($pages>1): ?><div class="pagination" id="quotePagination"><span class="info">共<?=$total?>条/<?=$pages?>页</span>
-<?php for($i=max(1,$page-2);$i<=min($pages,$page+2);$i++): ?><a href="?page=<?=$i?>&search=<?=urlencode($search)?>" class="<?=$i==$page?'active':''?>"><?=$i?></a><?php endfor; ?></div><?php endif; ?>
+<?php // 翻页要带上当前所有筛选条件，否则一点第 2 页搜索词/业务员就丢了 ?>
+<?php for($i=max(1,$page-2);$i<=min($pages,$page+2);$i++): ?><a href="?<?=sales_page_query($i, ['search','employee','status'])?>" class="<?=$i==$page?'active':''?>"><?=$i?></a><?php endfor; ?></div><?php endif; ?>
 
 <script>
 // 删除/转订单/撤回：AJAX 提交，成功后就地刷新列表，不再整页跳转（避免空白页）
