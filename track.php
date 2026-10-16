@@ -103,7 +103,11 @@ $pdo = getDB();
     <div class="pwd-card">
         <div class="icon">🔒</div>
         <h2>验证密码</h2>
-        <p>追踪码：<strong><?=htmlspecialchars($code)?></strong></p>
+        <?php // 客户扫了码进来往往不知道查询密码，把获取途径写在输密码之前，
+              // 省得客服反复被问「密码是多少」。第二个 <p> 继承 .pwd-card p 的
+              // gray-500 与 margin-bottom:24px，只缩小字号、保留与输入框的间距 ?>
+        <p style="margin-bottom:8px;">追踪码：<strong><?=htmlspecialchars($code)?></strong></p>
+        <p style="font-size:13px;">密码请联系您的专属服务经理获取</p>
         <input type="password" id="pwdInput" placeholder="请输入查询密码" maxlength="20" onkeydown="if(event.key==='Enter')verifyPwd()">
         <button onclick="verifyPwd()">验证</button>
         <div class="error" id="pwdError">密码错误，请重试</div>
