@@ -7,6 +7,10 @@ $pdo = getDB();
 $page = max(1, intval($_GET['page'] ?? 1));
 $search = $_GET['search'] ?? '';
 $isAdmin = (get_user_role() === 'admin');
+// 订单页的「出库」与「撤销出库」按独立权限控制，不再只有 admin 能点：
+// 库管勾了 sales_outstock_create / sales_outstock_undo 就能操作，销售则看不到这两个按钮
+$canCreate = check_sales_outstock_create();
+$canUndo   = check_sales_outstock_undo();
 
 $employee = trim($_GET['employee'] ?? '');   // 按业务员筛：下拉直接选某个人
 $status   = $_GET['status'] ?? '';           // 按状态筛
@@ -82,7 +86,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'unlock'
 // Q1=B：出库单软删除（置 cancelled），库存回滚，单据与明细保留留痕
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'undo_outstock') {
     csrf_verify();
-    if (!$isAdmin) die('无权限');
+    if (!$canUndo) die('无权限：撤销出库需要「销售出库：撤销出库」权限');
     $oid = intval($_POST['id']??0);
     $reason = trim($_POST['cancel_reason']??'');
     $st = $pdo->prepare("SELECT * FROM sales_orders WHERE id=?");
@@ -223,11 +227,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'delete'
             <a href="order_view.php?id=<?=$item['id']?>" class="btn btn-sm btn-outline">详情</a>
             <?php elseif ($item['status'] === 'confirmed'): ?>
             <?php if ($isAdmin): ?><form method="post" style="display:inline"><?= csrf_field() ?><input type="hidden" name="action" value="unlock"><input type="hidden" name="id" value="<?=$item['id']?>"><button class="btn btn-sm" style="color:var(--gray-400);border-color:var(--gray-300);background:var(--gray-50);">已锁定</button></form><?php endif; ?>
-            <?php if ($isAdmin): ?><a href="../sales/outstock.php?from_order=<?=$item['id']?>" class="btn btn-sm btn-primary"><i class="fa-solid fa-truck-fast"></i> 出库</a><?php endif; ?>
+            <?php if ($canCreate): ?><a href="../sales/outstock.php?from_order=<?=$item['id']?>" class="btn btn-sm btn-primary"><i class="fa-solid fa-truck-fast"></i> 出库</a><?php endif; ?>
             <?php if ($isAdmin): ?><a href="order_cancel.php?id=<?=$item['id']?>" class="btn btn-sm btn-outline" style="color:var(--danger);border-color:var(--danger)">取消订单</a><?php endif; ?>
             <a href="order_view.php?id=<?=$item['id']?>" class="btn btn-sm btn-outline">详情</a>
             <?php elseif ($item['status'] === 'shipped'): ?>
-            <?php if ($isAdmin): ?><button type="button" class="btn btn-sm btn-success" onclick="openUndoOutstock(<?=$item['id']?>, '<?= htmlspecialchars($item['bill_no'], ENT_QUOTES) ?>')">已出库（点此撤销）</button><?php endif; ?>
+            <?php if ($canUndo): ?><button type="button" class="btn btn-sm btn-success" onclick="openUndoOutstock(<?=$item['id']?>, '<?= htmlspecialchars($item['bill_no'], ENT_QUOTES) ?>')">已出库（点此撤销）</button><?php endif; ?>
             <a href="order_view.php?id=<?=$item['id']?>" class="btn btn-sm btn-outline">详情</a>
             <?php endif; ?>
         </div>
@@ -243,7 +247,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'delete'
 <?php // 翻页要带上当前所有筛选条件，否则一点第 2 页业务员/状态筛选就丢了 ?>
 <?php for($i=max(1,$page-2);$i<=min($pages,$page+2);$i++): ?><a href="?<?=sales_page_query($i, ['search','employee','status'])?>" class="<?=$i==$page?'active':''?>"><?=$i?></a><?php endfor; ?></div><?php endif; ?>
 
-<?php if ($isAdmin): ?>
+<?php if ($canUndo): ?>
 <!-- 撤销出库（软删除，保留出库单留痕） -->
 <div class="modal-overlay" id="undoOutstockModal"><div class="modal modal-sm"><div class="modal-header"><h3 class="modal-title">撤销出库</h3><button class="modal-close" onclick="closeModal('undoOutstockModal')">&times;</button></div>
 <form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="undo_outstock"><input type="hidden" name="id" id="undoId" value="0">

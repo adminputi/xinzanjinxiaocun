@@ -6,6 +6,11 @@ require_once __DIR__ . '/bill_filter.php';
 require_permission('sales_outstock');
 $pdo = getDB();
 $isAdmin = (get_user_role() === 'admin');
+// 出库的三个动作分开授权：能看这张列表（sales_outstock，上面已校验）
+// ≠ 能出库（create）≠ 能撤销（undo）≠ 能看全部（all）
+$canCreate = check_sales_outstock_create();
+$canUndo   = check_sales_outstock_undo();
+$seeAll    = check_sales_outstock_all();
 
 // 执行数据库迁移（替代运行时 ALTER TABLE）
 run_migrations();
@@ -32,9 +37,19 @@ if ($status !== '') {
     $conditions[] = "so.status = ?";
     $params[] = $status;
 }
-// 非admin用户只看自己创建的出库单
-if (!$isAdmin) {
-    $conditions[] = "so.user_id = ?";
+// 出库单可见范围：与出库详情页同一口径 —— 客户归属本人，或本人亲手创建。
+//
+// 原来只按 user_id（创建人）过滤，这里有个坑：出库单通常是库管在订单页
+// 替业务员点的「出库」，user_id 记的是库管，于是业务员永远看不到自己客户的
+// 出库单（表现就是「明明给了销售出库权限却看不到单子」）。
+//
+// 保留 user_id 这一支是兜底：库管替别人出货时，也不会把自己刚出的单弄丢。
+// 勾了 sales_outstock_all（或 sales_view_all）的人不加限制。
+// 注：没有关联客户的出库单（customer_id 为空或客户已删）c.owner_id 为 NULL，
+//     谁都匹配不上，仅管理员可见 —— 与 CRM/销售/追踪全站口径一致。
+if (!$seeAll) {
+    $conditions[] = "(c.owner_id = ? OR so.user_id = ?)";
+    $params[] = get_user_id();
     $params[] = get_user_id();
 }
 if ($conditions) {
@@ -63,7 +78,9 @@ $products = $pdo->query("SELECT id,sku,name,spec,sale_price,(SELECT name FROM un
 
 // 从销售订单跳转过来的预填数据
 $fromOrder = null; $fromItems = [];
-if (isset($_GET['from_order']) && intval($_GET['from_order']) > 0) {
+// 从订单页「出库」按钮跳过来时预填单据。没 create 权限的一律忽略这个参数：
+// 否则销售只要手敲 outstock.php?from_order=xx 就能绕过按钮打开新增出库弹窗。
+if ($canCreate && isset($_GET['from_order']) && intval($_GET['from_order']) > 0) {
     $oid = intval($_GET['from_order']);
     // 检查是否已经出库过：
     // 只拦「有效出库单」——已撤销的（status='cancelled'）允许重新出库，否则撤销后这张订单永远出不了货
@@ -91,6 +108,8 @@ $currentEmpId = get_user_id();
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'save') {
     csrf_verify();
+    // 藏了按钮还不够：直接构造 POST 一样能建单，这里必须再拦一道
+    if (!$canCreate) die('无权限：执行出库需要「销售出库：执行出库」权限');
     $customerId = intval($_POST['customer_id']??0);
     $warehouseId = intval($_POST['warehouse_id']??0);
     $outstockDate = $_POST['outstock_date']??date('Y-m-d');
@@ -165,7 +184,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'save') 
 // Q1=B：不再物理删除，避免「出了库又撤」的痕迹在单据层面彻底消失
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'undo') {
     csrf_verify();
-    if (!$isAdmin) die('无权限');
+    if (!$canUndo) die('无权限：撤销出库需要「销售出库：撤销出库」权限');
     $oid = intval($_POST['id']??0);
     $cancelReason = trim($_POST['cancel_reason'] ?? '');
     $stmt = $pdo->prepare("SELECT * FROM sales_outstocks WHERE id=?");
@@ -196,7 +215,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'undo') 
 
 <div class="page-header">
     <h1 class="page-title"><i class="fa-solid fa-truck-fast"></i> 销售出库</h1>
+    <?php // 新增出库单原来谁都能点，销售也能自己开单；现在收口到 create 权限 ?>
+    <?php if ($canCreate): ?>
     <button class="btn btn-primary" onclick="openOutModal()"><i class="fa-solid fa-plus"></i> 新增出库单</button>
+    <?php endif; ?>
 </div>
 <?php flash_show(); ?>
 <?php if (isset($error)): ?><div class="alert alert-danger"><?= $error ?></div><?php endif; ?>
@@ -228,7 +250,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action']??'') === 'undo') 
     <td>
         <a href="outstock_view.php?id=<?=$item['id']?>" class="btn btn-sm btn-outline" title="详情"><i class="fa-solid fa-eye"></i></a>
         <a href="outstock_view.php?id=<?=$item['id']?>&print=1" class="btn btn-sm btn-outline" title="打印出库单"><i class="fa-solid fa-print"></i></a>
-        <?php if ($item['status']=='confirmed' && $isAdmin): ?>
+        <?php if ($item['status']=='confirmed' && $canUndo): ?>
         <a href="javascript:void(0)" class="btn btn-sm btn-outline" title="撤销出库（恢复库存，出库单置已撤销留痕）" style="color:var(--warning)" onclick="showUndoModal(<?=$item['id']?>,'<?=$item['bill_no']?>')"><i class="fa-solid fa-rotate-left"></i></a>
         <?php endif; ?>
     </td>

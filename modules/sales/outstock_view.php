@@ -13,7 +13,10 @@ if (!$outstock) { die('出库单不存在'); }
 // 非admin用户只能查看与自己相关的记录：本人创建，或该客户归属本人
 // （与追踪码/CRM 一致按客户 owner_id 判定，否则从追踪码列表点进来会被拒）
 $isAdmin = ($_SESSION['user_role'] ?? '') === 'admin';
+// 可见范围与列表页同一口径：客户归属本人、或本人亲手创建；
+// 勾了 sales_outstock_all（或 sales_view_all）的可以看全部（典型：库管）
 if (!$isAdmin
+    && !check_sales_outstock_all()
     && intval($outstock['user_id'] ?? 0) !== intval(get_user_id())
     && intval($outstock['customer_owner_id'] ?? 0) !== intval(get_user_id())) {
     die('无权查看此记录');

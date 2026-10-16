@@ -579,6 +579,12 @@ function perm_code_list() {
         'customer_view' => '客户查看', 'customer_edit' => '客户编辑（新增/修改/删除）', 'supplier_view' => '供应商查看', 'supplier_edit' => '供应商编辑（新增/修改/删除）', 'warehouse_edit' => '仓库编辑（新增/修改/删除）',
         'purchase_order' => '采购订单', 'purchase_instock' => '采购入库', 'purchase_return' => '采购退货', 'purchase_reconcile' => '采购对账',
         'sales_quote' => '销售报价', 'sales_contract' => '销售合同', 'sales_order' => '销售订单', 'sales_outstock' => '销售出库', 'sales_return' => '销售退货', 'sales_reconcile' => '客户对账', 'print_template' => '打印模板',
+        // 销售出库：查看 / 执行出库 / 撤销 三件事拆开授权，可分别赋给不同角色。
+        // 典型用法：库管勾 sales_outstock + create + undo + all（能出库、能撤销、能看全部）；
+        // 销售只勾 sales_outstock（只能查看和打印属于自己的出库单，看不到出库与撤销按钮）。
+        'sales_outstock_create' => '销售出库：执行出库（订单页「出库」按钮、出库页「新增出库单」）',
+        'sales_outstock_undo' => '销售出库：撤销出库（恢复库存、出库单置已撤销留痕，默认仅管理员）',
+        'sales_outstock_all' => '销售出库：查看全部出库单（不受客户归属限制，默认仅管理员；只管出库单，不牵连看板/订单/报表）',
         // 销售收款：只覆盖「出库单/订单详情里的登记收款、修改收款状态」，不含收款记录列表与作废
         'sales_receive' => '销售收款登记（登记收款/修改收款状态）',
         'inventory_view' => '库存查看', 'inventory_log' => '库存变动', 'transfer_manage' => '调拨管理', 'check_manage' => '盘点管理', 'loss_manage' => '库存调整',
@@ -658,6 +664,41 @@ function check_sales_all() {
     if (!isset($_SESSION['user_id'])) return false;
     if (($_SESSION['user_role'] ?? '') === 'admin') return true;
     return check_permission('sales_view_all');
+}
+
+/**
+ * 销售出库的三个动作：执行出库 / 撤销 / 查看全部。
+ *
+ * 与 crm_view_all、sales_view_all 同一套路（admin 直通 + 权限码），
+ * 目的是让「看单据」和「动单据」能分开赋权：
+ *   库管  = sales_outstock + create + undo + all
+ *   销售  = 只勾 sales_outstock（能看能打印，看不到出库与撤销按钮）
+ *
+ * @return bool
+ */
+function check_sales_outstock_create() {
+    if (!isset($_SESSION['user_id'])) return false;
+    if (($_SESSION['user_role'] ?? '') === 'admin') return true;
+    return check_permission('sales_outstock_create');
+}
+
+function check_sales_outstock_undo() {
+    if (!isset($_SESSION['user_id'])) return false;
+    if (($_SESSION['user_role'] ?? '') === 'admin') return true;
+    return check_permission('sales_outstock_undo');
+}
+
+/**
+ * 能否查看「全部」出库单（不受客户归属限制）。
+ *
+ * 只管出库单，不像 sales_view_all 那样牵连看板/订单/报表 ——
+ * 库管只需要勾这一个就能看到所有人出的库，不必顺带拿到全公司销售数据。
+ * 已勾了 sales_view_all（销售数据全看）的，出库单自然也在其中，一并放行。
+ */
+function check_sales_outstock_all() {
+    if (!isset($_SESSION['user_id'])) return false;
+    if (($_SESSION['user_role'] ?? '') === 'admin') return true;
+    return check_permission('sales_outstock_all') || check_permission('sales_view_all');
 }
 
 /**
